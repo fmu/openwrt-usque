@@ -113,6 +113,11 @@ Rationale: `h2` + the `hyper`/`tower` client stack costs several hundred kB and
 UDP/443 MASQUE was verified to work through the target networks (iPhone
 tethering), so HTTP/2 is not worth its size on a 3.3 MB overlay.
 
+`vendor/h3.patch` additionally teaches the patched `h3` crate the
+standards-track RFC 9484 `:protocol` token `connect-ip` (next to Cloudflare's
+legacy `cf-connect-ip`), so the client can talk to self-hosted MASQUE
+CONNECT-IP servers (see §8).
+
 ## 6. Registration HTTP client instead of `reqwest`
 
 `reqwest` drags in `hyper` (client), `tower`, `tower-http`, `url`, `idna` and
@@ -157,6 +162,19 @@ gone (see §4).
   non-interactively with a message telling the caller to pass `--regen-key`.
 * `usque --config FILE native-tun -n IFACE [...] --auto-register`:
   registers a new client (TOS auto-accepted) when the config file is missing.
+* Non-Cloudflare endpoints (all defaults keep current behaviour):
+  * `--authority <host|uri>` (default `https://cloudflareaccess.com`) sets the
+    extended CONNECT `:authority`; a bare host is normalised to
+    `https://<host>`;
+  * `--protocol <token>` (default `cf-connect-ip`) selects the extended
+    CONNECT `:protocol`: `cf-connect-ip` for Cloudflare, `connect-ip` for
+    RFC 9484 servers;
+  * together with the existing `-s/--sni-address` and `-P/--connect-port` and a
+    config whose `endpoint_v4`/`endpoint_v6` point at the server and whose
+    `endpoint_pub_key` pins its certificate SPKI, no other field is
+    Cloudflare-specific. The endpoint must be an IP literal (the config schema
+    has no DNS field), so a hostname has to be resolved before writing the
+    config.
 
 ## 9. Build/portability fixes
 

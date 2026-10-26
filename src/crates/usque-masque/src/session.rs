@@ -17,7 +17,14 @@ pub struct ConnectOptions {
     pub sni: String,
     pub keepalive_period: Duration,
     pub initial_packet_size: u16,
+    /// URI used for the extended CONNECT request: its authority becomes the
+    /// `:authority` pseudo-header. Cloudflare uses
+    /// `https://cloudflareaccess.com`; self-hosted servers can override it.
     pub connect_uri: String,
+    /// Extended CONNECT `:protocol` token. `cf-connect-ip` is Cloudflare's
+    /// legacy WARP token (the default, unchanged behaviour); RFC 9484 MASQUE
+    /// servers use `connect-ip`.
+    pub connect_protocol: String,
 }
 
 #[derive(Debug, Error)]

@@ -33,6 +33,15 @@ pub struct TunnelFlags {
     pub no_tunnel_ipv6: bool,
     #[arg(short = 's', long = "sni-address", default_value = usque_cloudflare_api::CONNECT_SNI)]
     pub sni_address: String,
+    /// Extended CONNECT `:authority` for the MASQUE endpoint (hostname or full
+    /// `https://host` URI). Defaults to Cloudflare's WARP authority; override
+    /// for self-hosted MASQUE/CONNECT-IP servers.
+    #[arg(long = "authority", default_value = usque_cloudflare_api::CONNECT_URI)]
+    pub authority: String,
+    /// Extended CONNECT `:protocol` token: `cf-connect-ip` (Cloudflare's
+    /// legacy WARP token, default) or `connect-ip` (RFC 9484).
+    #[arg(long = "protocol", default_value = "cf-connect-ip")]
+    pub protocol: String,
     #[arg(short = 'k', long = "keepalive-period", default_value = "30s")]
     pub keepalive_period: humantime::Duration,
     #[arg(short = 'm', long = "mtu", default_value_t = DEFAULT_TUNNEL_MTU)]
@@ -98,6 +107,60 @@ pub fn build_connect_options(config: &Config, flags: &TunnelFlags) -> Result<Con
         sni: flags.sni_address.clone(),
         keepalive_period: Duration::from(flags.keepalive_period),
         initial_packet_size: flags.initial_packet_size,
-        connect_uri: usque_cloudflare_api::CONNECT_URI.to_string(),
+        connect_uri: connect_uri_from_authority(&flags.authority),
+        connect_protocol: flags.protocol.clone(),
     })
+}
+
+/// Normalise the `--authority` value into the URI that carries the extended
+/// CONNECT `:authority` pseudo-header.
+///
+/// Accepts either a bare host (`masque.example.com`) or a full URI
+/// (`https://masque.example.com`), because the UCI option is documented as an
+/// authority/host but operators may paste a URL.
+pub fn connect_uri_from_authority(authority: &str) -> String {
+    let authority = authority.trim();
+    if authority.contains("://") {
+        authority.to_string()
+    } else if authority.is_empty() {
+        usque_cloudflare_api::CONNECT_URI.to_string()
+    } else {
+        format!("https://{authority}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connect_uri_from_authority;
+    use usque_cloudflare_api::CONNECT_URI;
+
+    #[test]
+    fn default_authority_matches_cloudflare() {
+        assert_eq!(connect_uri_from_authority(CONNECT_URI), CONNECT_URI);
+    }
+
+    #[test]
+    fn bare_host_becomes_https_uri() {
+        assert_eq!(
+            connect_uri_from_authority("masque.example.com"),
+            "https://masque.example.com"
+        );
+        assert_eq!(
+            connect_uri_from_authority(" masque.example.com:8443 "),
+            "https://masque.example.com:8443"
+        );
+    }
+
+    #[test]
+    fn full_uri_is_passed_through() {
+        assert_eq!(
+            connect_uri_from_authority("https://masque.example.com/connect"),
+            "https://masque.example.com/connect"
+        );
+    }
+
+    #[test]
+    fn empty_authority_falls_back_to_default() {
+        assert_eq!(connect_uri_from_authority(""), CONNECT_URI);
+    }
 }

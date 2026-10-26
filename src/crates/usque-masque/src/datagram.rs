@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes};
 
-use crate::capsule::{put_varint, CAPSULE_CONNECT_IP_DATA};
+use crate::capsule::put_varint;
 
 const CONTEXT_ID: u64 = 0;
 

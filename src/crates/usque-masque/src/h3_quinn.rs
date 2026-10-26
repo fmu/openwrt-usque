@@ -71,7 +71,15 @@ pub async fn connect_h3(options: &crate::session::ConnectOptions) -> Result<Conn
 
     let (mut request_stream, response) = {
         let uri: Uri = options.connect_uri.parse().context("invalid connect URI")?;
-        let protocol = h3::ext::Protocol::CF_CONNECT_IP;
+        let protocol: h3::ext::Protocol = options
+            .connect_protocol
+            .parse()
+            .map_err(|_| {
+                anyhow!(
+                    "invalid CONNECT :protocol token {:?} (expected e.g. cf-connect-ip or connect-ip)",
+                    options.connect_protocol
+                )
+            })?;
         let request = http::Request::builder()
             .method(http::Method::CONNECT)
             .uri(uri)

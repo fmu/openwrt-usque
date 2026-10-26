@@ -151,6 +151,55 @@ mod tests {
         }
     }
 
+    /// Non-Cloudflare endpoints: `--authority` and `--protocol` must reach the
+    /// connect options, and `-s`/`-P` must stay overridable alongside them.
+    #[test]
+    fn parse_nativetun_custom_endpoint_overrides() {
+        let cli = Cli::parse_from_args([
+            "usque",
+            "--config",
+            "/etc/usque/custom.json",
+            "native-tun",
+            "-n",
+            "warp0",
+            "-s",
+            "masque.example.com",
+            "-P",
+            "8443",
+            "--authority",
+            "masque.example.com",
+            "--protocol",
+            "connect-ip",
+        ])
+        .unwrap();
+        match cli.command {
+            crate::cmd::Commands::NativeTun(args) => {
+                assert_eq!(args.tunnel.sni_address, "masque.example.com");
+                assert_eq!(args.tunnel.connect_port, 8443);
+                assert_eq!(args.tunnel.authority, "masque.example.com");
+                assert_eq!(args.tunnel.protocol, "connect-ip");
+                assert_eq!(
+                    crate::runtime::connect_uri_from_authority(&args.tunnel.authority),
+                    "https://masque.example.com"
+                );
+            }
+            _ => panic!("expected native-tun"),
+        }
+    }
+
+    #[test]
+    fn custom_endpoint_defaults_are_cloudflare_compatible() {
+        let cli = Cli::parse_from_args(["usque", "native-tun"]).unwrap();
+        match cli.command {
+            crate::cmd::Commands::NativeTun(args) => {
+                assert_eq!(args.tunnel.authority, usque_cloudflare_api::CONNECT_URI);
+                assert_eq!(args.tunnel.sni_address, usque_cloudflare_api::CONNECT_SNI);
+                assert_eq!(args.tunnel.protocol, "cf-connect-ip");
+            }
+            _ => panic!("expected native-tun"),
+        }
+    }
+
     #[test]
     fn removed_proxy_subcommands_are_gone() {
         for removed in ["socks", "http-proxy", "port-fw"] {
