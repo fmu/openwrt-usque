@@ -8,30 +8,46 @@
 'require dom';
 
 /*
- * LuCI view for luci-app-usque: Services -> usque (Cloudflare WARP)
+ * LuCI view for luci-app-usque (v2): Services -> usque (Cloudflare WARP)
  *
- * The heavy lifting happens in the rpcd backend /usr/libexec/rpcd/luci.usque
- * (object luci.usque). This view only renders state and triggers actions.
+ * Supports multiple independent MASQUE/Connect-IP connections (one UCI
+ * "config usque '<sid>'" section each), an opt-in default route per connection,
+ * IPv6 default-route handling and optional LAN IPv6 (NAT66).
+ *
+ * The heavy lifting lives in the rpcd backend /usr/libexec/rpcd/luci.usque
+ * (ubus object luci.usque); this view only renders state and triggers actions.
+ * Secrets (private_key/access_token) are never part of the backend replies and
+ * therefore never reach this page.
  */
 
 var DOCS_URL = 'https://fmu.github.io/openwrt-usque/';
 var TOS_URL = 'https://www.cloudflare.com/application/terms/';
 var POLL_INTERVAL = 5;
 
+var CONFIG_EXAMPLE = '{\n' +
+	'  "private_key": "<base64 private key>",\n' +
+	'  "endpoint_v4": "192.0.2.1",\n' +
+	'  "endpoint_v6": "",\n' +
+	'  "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\\n...\\n-----END PUBLIC KEY-----",\n' +
+	'  "ipv4": "172.16.0.2",\n' +
+	'  "ipv6": ""\n' +
+	'}';
+
 /* rpcd methods (see /usr/libexec/rpcd/luci.usque) */
 var callStatus = rpc.declare({ object: 'luci.usque', method: 'status', expect: {} });
-var callGetConfig = rpc.declare({ object: 'luci.usque', method: 'getConfig', expect: {} });
-var callRegister = rpc.declare({ object: 'luci.usque', method: 'register', params: [ 'name', 'accept_tos' ], expect: {} });
-var callRegisterStatus = rpc.declare({ object: 'luci.usque', method: 'registerStatus', expect: {} });
-var callSetInitAction = rpc.declare({ object: 'luci.usque', method: 'setInitAction', params: [ 'action' ], expect: {} });
-var callTest = rpc.declare({ object: 'luci.usque', method: 'test', expect: {} });
-var callLogs = rpc.declare({ object: 'luci.usque', method: 'logs', expect: {} });
-var callDeleteConfig = rpc.declare({ object: 'luci.usque', method: 'deleteConfig', expect: {} });
-var callFixPermissions = rpc.declare({ object: 'luci.usque', method: 'fixConfigPermissions', expect: {} });
+var callGetConfig = rpc.declare({ object: 'luci.usque', method: 'getConfig', params: [ 'section' ], expect: {} });
+var callRegister = rpc.declare({ object: 'luci.usque', method: 'register', params: [ 'section', 'name', 'accept_tos' ], expect: {} });
+var callRegisterStatus = rpc.declare({ object: 'luci.usque', method: 'registerStatus', params: [ 'section' ], expect: {} });
+var callImportConfig = rpc.declare({ object: 'luci.usque', method: 'importConfig', params: [ 'section', 'json' ], expect: {} });
+var callDeleteConfig = rpc.declare({ object: 'luci.usque', method: 'deleteConfig', params: [ 'section' ], expect: {} });
+var callSetInitAction = rpc.declare({ object: 'luci.usque', method: 'setInitAction', params: [ 'action', 'section' ], expect: {} });
+var callTest = rpc.declare({ object: 'luci.usque', method: 'test', params: [ 'section' ], expect: {} });
+var callLogs = rpc.declare({ object: 'luci.usque', method: 'logs', params: [ 'section' ], expect: {} });
+var callFixPermissions = rpc.declare({ object: 'luci.usque', method: 'fixConfigPermissions', params: [ 'section' ], expect: {} });
 
-/* Map.save() only stages changes in the uci session delta; the init script reads
- * the committed /etc/config/usque, so we have to commit (apply) before restarting.
- * "uci apply" is part of the standard LuCI ACLs, plain "uci commit" is not. */
+/* Map.save() only stages changes in the uci session delta; commit them so the
+ * init script reads the new /etc/config/usque. "uci apply" is covered by the
+ * stock LuCI ACLs (plain "uci commit" is not). */
 var callUciApply = rpc.declare({ object: 'uci', method: 'apply', params: [ 'timeout', 'rollback' ], expect: {} });
 
 /* -------------------------------------------------------------------------
@@ -81,8 +97,7 @@ function errText(res) {
 }
 
 function badge(text, cls) {
-	var node = E('span', { 'class': 'label' + (cls ? ' ' + cls : '') }, text);
-	return node;
+	return E('span', { 'class': 'label' + (cls ? ' ' + cls : '') }, text);
 }
 
 function setBadge(node, text, cls) {
@@ -104,6 +119,10 @@ function valueRow(title, content, description) {
 	]);
 }
 
+function listCount(list) {
+	return (list && list.length) ? list.length : 0;
+}
+
 /* -------------------------------------------------------------------------
  * view
  * ---------------------------------------------------------------------- */
@@ -112,8 +131,8 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			L.resolveDefault(callStatus(), null),
-			L.resolveDefault(callGetConfig(), null),
-			L.resolveDefault(callLogs(), null)
+			L.resolveDefault(callLogs(), null),
+			L.resolveDefault(uci.load('usque'), null)
 		]);
 	},
 
@@ -121,291 +140,472 @@ return view.extend({
 		var self = this;
 
 		this.status = (data && data[0]) || {};
-		this.config = (data && data[1]) || {};
-		this.logs = (data && data[2]) || {};
-		this.lastTest = null;
-		this.registering = false;
+		this.logs = (data && data[1]) || {};
+		this.lastTest = {};
+		this.registering = null;   /* section id while a registration runs */
+		this.regSection = null;
+		this.rowIds = null;
+		this.rowRefs = {};
+		this.acctIds = null;
 		this.pollActive = true;
 		this.pollFn = null;
 
-		var statusSection = this.renderStatusSection();
-		var accountSection = this.renderAccountSection();
-		var diagSection = this.renderDiagnosticsSection();
+		var overview = this.renderOverview();
+		var conns = this.renderConnections();
+		var account = this.renderAccount();
+		var diag = this.renderDiagnostics();
 
-		var map = new form.Map('usque', '', _('Requires UDP 443 to Cloudflare. While the tunnel is up, policy routing/mwan3 rules for the default route are overridden. These options are written to /etc/config/usque; Save & Apply commits them and restarts the service.'));
+		var map = new form.Map('usque', '', _('All connections are independent MASQUE/Connect-IP tunnels. Routing is opt-in: nothing in this page changes the default route unless you enable it below.'));
 		this.map = map;
 		this.buildForm(map);
 
 		return map.render().then(function(mapNode) {
-			self.rootEl = E('div', {}, [ statusSection, accountSection, mapNode, diagSection ]);
+			self.rootEl = E('div', {}, [ overview, conns, mapNode, account, diag ]);
 			self.updateStatus(self.status);
-			self.updateAccount(self.status);
-
+			self.updateAccountSection();
 			self.pollFn = function() { return self.refresh(); };
 			poll.add(self.pollFn, POLL_INTERVAL);
-
 			return self.rootEl;
 		}).catch(function(err) {
-			/* /etc/config/usque missing or ACL problem: keep the page usable */
 			self.rootEl = E('div', {}, [
-				statusSection,
+				overview,
 				E('div', { 'class': 'cbi-section' }, [
 					E('div', { 'class': 'alert-message danger' }, [
 						E('h4', {}, _('Cannot load the usque configuration')),
 						E('p', {}, _('Reading /etc/config/usque failed: %s').format(err.message || err)),
-						E('p', {}, _('Make sure the usque package is installed, then reload this page.'))
+						E('p', {}, _('Make sure the usque package (version with multi-connection support) is installed, then reload this page.'))
 					])
 				]),
-				accountSection,
-				diagSection
+				conns, account, diag
 			]);
 			self.updateStatus(self.status);
-			self.updateAccount(self.status);
+			self.updateAccountSection();
 			return self.rootEl;
 		});
 	},
 
 	/* ---------------------------------------------------------------------
-	 * status section
+	 * overview (live)
 	 * ------------------------------------------------------------------ */
 
-	renderStatusSection: function() {
-		this.elBackend = E('div', { 'class': 'alert-message danger', 'style': 'display:none' });
+	renderOverview: function() {
 		this.elService = badge(_('unknown'));
 		this.elServiceNote = E('span', { 'class': 'cbi-value-description' });
-		this.elTunnel = badge(_('unknown'));
-		this.elIface = E('span');
-		this.elConfig = code();
-		this.elConfigPerm = E('span', { 'class': 'cbi-value-description' });
-		this.elDevice = code();
-		this.elWarpV4 = code();
-		this.elWarpV6 = code();
-		this.elEndpoint = E('span');
-		this.elEgress = E('span', {}, _('not tested yet'));
-
-		this.btnStart = E('button', {
-			'class': 'cbi-button cbi-button-positive',
-			'click': ui.createHandlerFn(this, 'handleStart')
-		}, _('Start'));
-
-		this.btnStop = E('button', {
-			'class': 'cbi-button cbi-button-negative',
-			'click': ui.createHandlerFn(this, 'handleStop')
-		}, _('Stop'));
-
-		this.btnRestart = E('button', {
-			'class': 'cbi-button',
-			'click': ui.createHandlerFn(this, 'handleRestart')
-		}, _('Restart'));
-
-		this.btnTest = E('button', {
-			'class': 'cbi-button cbi-button-action',
-			'click': ui.createHandlerFn(this, 'handleTest')
-		}, _('Test connection'));
+		this.elConnSummary = E('span');
+		this.elLanV6 = E('span');
+		this.elRouteState = E('span');
+		this.elWarnings = E('div', {});
 
 		return E('div', { 'class': 'cbi-section' }, [
-			E('h3', {}, _('Status')),
-			this.elBackend,
+			E('h2', {}, _('usque (Cloudflare WARP)')),
+			E('div', { 'class': 'cbi-map-descr' },
+				_('MASQUE/Connect-IP tunnels. Connections and their routing behaviour are configured below; this page never takes over the default route unless you explicitly enable it.')),
 			valueRow(_('Service'), [ this.elService, ' ', this.elServiceNote ]),
-			valueRow(_('Tunnel'), [ this.elTunnel, ' ', this.elIface ]),
-			valueRow(_('Configuration'), [ this.elConfig, ' ', this.elConfigPerm ]),
-			valueRow(_('WARP device'), [ this.elDevice ]),
-			valueRow(_('WARP IPv4'), [ this.elWarpV4 ]),
-			valueRow(_('WARP IPv6'), [ this.elWarpV6 ]),
-			valueRow(_('Endpoints'), [ this.elEndpoint ]),
-			valueRow(_('Egress test'), [ this.elEgress, ' ', this.btnTest ]),
-			valueRow(_('Service control'), E('div', {}, [ this.btnStart, ' ', this.btnStop, ' ', this.btnRestart ]),
-				_('Start/Stop act on /etc/init.d/usque immediately. The configuration below is applied with Save & Apply, which also restarts the service.'))
+			valueRow(_('Connections'), [ this.elConnSummary, ' ', this.elRouteState ]),
+			valueRow(_('LAN IPv6'), [ this.elLanV6 ]),
+			this.elWarnings
 		]);
 	},
 
-	updateStatus: function(st) {
-		var running, enabled, iface, extras, endpoints;
+	updateOverview: function() {
+		var st = this.status || {};
+		var conns = st.connections || [];
+		var service = st.service || {};
+		var globals = st.globals || {};
+		var enabled = 0, running = 0, defaultRouted = [], missingCfg = [], lanV6Conns = [];
 
-		if (!st || typeof st !== 'object') {
-			this.elBackend.style.display = '';
-			this.elBackend.textContent = _('The rpcd backend did not answer.');
-			return;
-		}
+		conns.forEach(function(c) {
+			if (c.enabled) enabled++;
+			if (c.running) running++;
+			if (c.route4_installed || c.route6_installed) defaultRouted.push(c.iface || c.section);
+			if (c.enabled && !c.config_exists) missingCfg.push(c.section);
+			if (c.enabled && (c.ipv6_route === 'auto' || c.ipv6_route === 'always'))
+				lanV6Conns.push(c.section);
+		});
 
-		/* keep the latest state around for the action handlers */
-		this.status = st;
-
-		if (st.ok !== true) {
-			this.elBackend.style.display = '';
-			this.elBackend.textContent = _('Backend error: %s').format(errText(st));
-		}
-		else {
-			this.elBackend.style.display = 'none';
-		}
-
-		running = !!st.running;
-		enabled = !!st.enabled;
-
-		if (running)
+		if (!service.init_script)
+			setBadge(this.elService, _('not installed'), 'important');
+		else if (running > 0)
 			setBadge(this.elService, _('Running'), 'success');
-		else if (enabled)
+		else if (enabled > 0)
 			setBadge(this.elService, _('Stopped'), 'warning');
 		else
 			setBadge(this.elService, _('Disabled'), '');
 
-		if (running) {
-			if (st.uptime > 0)
-				this.elServiceNote.textContent = _('pid %s, up %s').format(dash(st.pid), fmtDuration(st.uptime));
-			else if (st.pid)
-				this.elServiceNote.textContent = _('pid %s').format(st.pid);
+		this.elServiceNote.textContent = service.boot_enabled
+			? _('enabled on boot')
+			: (service.init_script ? _('not enabled on boot') : '');
+
+		this.elConnSummary.textContent = _('%d connection(s), %d running').format(listCount(conns), running);
+
+		if (defaultRouted.length)
+			this.elRouteState.textContent = _('default route through: %s').format(defaultRouted.join(', '));
+		else
+			this.elRouteState.textContent = _('no default route is installed (traffic keeps using the WAN)');
+
+		if (globals.lan_ipv6) {
+			if (globals.lan_ipv6_active)
+				this.elLanV6.textContent = _('enabled — ULA %s, RA %s, LAN addresses: %s').format(
+					dash(globals.lan_ula), dash(globals.lan_ra), dash(globals.lan_ipv6_addrs).trim());
 			else
-				this.elServiceNote.textContent = '';
-		}
-		else if (!st.installed) {
-			this.elServiceNote.textContent = _('usque binary not installed');
-		}
-		else if (!st.init_script) {
-			this.elServiceNote.textContent = _('init script /etc/init.d/usque missing');
-		}
-		else if (enabled && !st.init_enabled) {
-			this.elServiceNote.textContent = _('enabled in the configuration but not enabled on boot \u2014 Save & Apply fixes this');
-		}
-		else if (!enabled) {
-			this.elServiceNote.textContent = _('disabled in the configuration (enabled=0), the service will not start');
+				this.elLanV6.textContent = _('enabled but not active yet (missing ULA, RA server or LAN address)');
 		}
 		else {
-			this.elServiceNote.textContent = '';
+			this.elLanV6.textContent = _('disabled');
 		}
 
-		if (!st.iface_exists)
-			setBadge(this.elTunnel, _('no tunnel'), '');
-		else if (st.iface_up)
-			setBadge(this.elTunnel, _('up'), 'success');
-		else
-			setBadge(this.elTunnel, _('down'), 'warning');
+		var warnings = [];
+		if (!service.init_script)
+			warnings.push(E('div', { 'class': 'alert-message danger' }, _('The /etc/init.d/usque init script is missing; reinstall the usque package.')));
+		if (!listCount(conns))
+			warnings.push(E('div', { 'class': 'alert-message notice' }, _('No connections are configured yet. Add one below; the default connection is usually named "main" with interface warp0.')));
+		missingCfg.forEach(function(sid) {
+			warnings.push(E('div', { 'class': 'alert-message warning' }, _('Connection "%s" is enabled but has no configuration file yet. Register a WARP device or import a configuration in the "Account / configuration" section below.').format(sid)));
+		});
+		if (globals.lan_ipv6 && !globals.lan_ipv6_active)
+			warnings.push(E('div', { 'class': 'alert-message warning' }, _('LAN IPv6 is enabled but no LAN IPv6 is active. Check network.globals.ula_prefix, network.lan and dhcp.lan.ra; the init script only sets these up when the option is enabled and a connection provides an IPv6 route.')));
+		if (globals.lan_ipv6 && !lanV6Conns.length)
+			warnings.push(E('div', { 'class': 'alert-message warning' }, _('LAN IPv6 needs a connection with IPv6 enabled and ipv6_route=auto or always; none is enabled.')));
+		if (defaultRouted.length)
+			warnings.push(E('div', { 'class': 'alert-message notice' }, _('While a tunnel default route is installed, router and LAN traffic use %s. Disable "Install default route" for a connection to keep the WAN as the default path.').format(defaultRouted.join(', '))));
 
-		iface = dash(st.iface);
-		extras = [];
-		if (st.iface_ipv4)
-			extras.push(st.iface_ipv4);
-		if (st.iface_ipv6)
-			extras.push(st.iface_ipv6);
-		if (st.default_route_via_iface)
-			extras.push(_('default route'));
-		this.elIface.textContent = iface + (extras.length ? ' — ' + extras.join(', ') : '');
-
-		if (!st.config_exists)
-			this.elConfig.textContent = _('%s (missing)').format(dash(st.config_path));
-		else if (!st.config_valid)
-			this.elConfig.textContent = _('%s (invalid JSON)').format(dash(st.config_path));
-		else
-			this.elConfig.textContent = dash(st.config_path);
-
-		if (st.config_exists && !st.config_secure)
-			setBadge(this.elConfigPerm, _('mode %s — private key is readable by other users!').format(dash(st.config_mode)), 'important');
-		else if (st.config_exists && st.config_mode) {
-			this.elConfigPerm.className = 'cbi-value-description';
-			this.elConfigPerm.textContent = _('mode %s').format(st.config_mode);
-		}
-		else {
-			this.elConfigPerm.className = 'cbi-value-description';
-			this.elConfigPerm.textContent = '';
-		}
-
-		this.elDevice.textContent = dash(st.device_id);
-		this.elWarpV4.textContent = dash(st.warp_ipv4);
-		this.elWarpV6.textContent = dash(st.warp_ipv6);
-
-		endpoints = [];
-		if (st.endpoint_v4)
-			endpoints.push(st.endpoint_v4);
-		if (st.endpoint_v6)
-			endpoints.push(st.endpoint_v6);
-		this.elEndpoint.textContent = endpoints.length ? endpoints.join(' · ') : '—';
-
-		if (this.lastTest) {
-			this.elEgress.textContent = _('WARP %s · %s · colo %s').format(
-				String(this.lastTest.warp || 'unknown').toUpperCase(),
-				dash(this.lastTest.ip), dash(this.lastTest.colo));
-		}
-
-		this.updateAccount(st);
+		dom.content(this.elWarnings, warnings);
 	},
 
 	/* ---------------------------------------------------------------------
-	 * WARP account section
+	 * live connection table
 	 * ------------------------------------------------------------------ */
 
-	renderAccountSection: function() {
+	renderConnections: function() {
+		this.statusBody = E('tbody', {});
+		this.elNoConns = E('div', { 'class': 'cbi-value-description', 'style': 'display:none' },
+			_('No connections configured.'));
+
+		var header = E('tr', { 'class': 'tr cbi-section-table-titles named' }, [
+			E('th', { 'class': 'th' }, _('Connection')),
+			E('th', { 'class': 'th' }, _('Mode')),
+			E('th', { 'class': 'th' }, _('State')),
+			E('th', { 'class': 'th' }, _('IPv4')),
+			E('th', { 'class': 'th' }, _('IPv6')),
+			E('th', { 'class': 'th' }, _('Routing')),
+			E('th', { 'class': 'th' }, _('Actions'))
+		]);
+
+		return E('div', { 'class': 'cbi-section' }, [
+			E('h3', {}, _('Connections')),
+			E('table', { 'class': 'table' }, [ E('thead', {}, header), this.statusBody ]),
+			this.elNoConns
+		]);
+	},
+
+	buildRow: function(sid) {
+		var ref = {
+			iface: E('td', { 'class': 'td' }),
+			mode: E('td', { 'class': 'td' }),
+			state: E('td', { 'class': 'td' }),
+			v4: E('td', { 'class': 'td' }),
+			v6: E('td', { 'class': 'td' }),
+			route: E('td', { 'class': 'td' }),
+			actions: E('td', { 'class': 'td nowrap' })
+		};
+
+		ref.btnStart = E('button', {
+			'class': 'cbi-button cbi-button-positive',
+			'style': 'margin:1px',
+			'click': ui.createHandlerFn(this, 'handleStartSection', sid)
+		}, _('Start'));
+
+		ref.btnStop = E('button', {
+			'class': 'cbi-button cbi-button-negative',
+			'style': 'margin:1px',
+			'click': ui.createHandlerFn(this, 'handleStopSection', sid)
+		}, _('Stop'));
+
+		ref.btnRestart = E('button', {
+			'class': 'cbi-button',
+			'style': 'margin:1px',
+			'click': ui.createHandlerFn(this, 'handleRestartSection', sid)
+		}, _('Restart'));
+
+		ref.btnTest = E('button', {
+			'class': 'cbi-button cbi-button-action',
+			'style': 'margin:1px',
+			'click': ui.createHandlerFn(this, 'handleTestSection', sid)
+		}, _('Test'));
+
+		ref.btnLogs = E('button', {
+			'class': 'cbi-button',
+			'style': 'margin:1px',
+			'click': ui.createHandlerFn(this, 'handleLogsSection', sid)
+		}, _('Logs'));
+
+		dom.content(ref.actions, [ ref.btnStart, ref.btnStop, ref.btnRestart, ref.btnTest, ref.btnLogs ]);
+
+		ref.tr = E('tr', { 'class': 'tr cbi-section-table-row' }, [
+			ref.iface, ref.mode, ref.state, ref.v4, ref.v6, ref.route, ref.actions
+		]);
+
+		return ref;
+	},
+
+	updateRow: function(c) {
+		var ref = this.rowRefs[c.section];
+		var routing = [];
+		var lastTest;
+
+		if (!ref)
+			return;
+
+		dom.content(ref.iface, [
+			E('strong', {}, c.section),
+			E('div', { 'class': 'cbi-value-description' }, dash(c.iface)),
+			c.config_exists ? '' : badge(_('no config'), 'warning'),
+			(c.config_exists && !c.config_secure) ? badge(_('insecure file'), 'important') : ''
+		]);
+
+		dom.content(ref.mode, badge(c.mode === 'custom' ? _('Custom') : _('Cloudflare'), ''));
+		if (!c.enabled)
+			dom.content(ref.mode, [ badge(c.mode === 'custom' ? _('Custom') : _('Cloudflare'), ''), ' ', badge(_('disabled'), '') ]);
+
+		if (c.running)
+			setBadge(ref.state, _('Running'), 'success');
+		else if (c.enabled)
+			setBadge(ref.state, _('Stopped'), 'warning');
+		else
+			setBadge(ref.state, _('Disabled'), '');
+
+		ref.v4.textContent = dash(c.iface_ipv4 || c.warp_ipv4);
+		ref.v6.textContent = dash(c.iface_ipv6 || c.warp_ipv6);
+
+		if (c.route4_installed)
+			routing.push(badge(_('IPv4 default'), 'success'));
+		if (c.route6_installed)
+			routing.push(badge(_('IPv6 default'), 'success'));
+		if (c.default_route && !c.route4_installed)
+			routing.push(badge(_('IPv4 route pending'), 'warning'));
+		if (c.ipv6_route === 'always' && !c.route6_installed)
+			routing.push(badge(_('IPv6 route pending'), 'warning'));
+		if (!c.default_route && !c.route4_installed)
+			routing.push(E('span', { 'class': 'cbi-value-description' }, _('IPv4: not routed')));
+		if (c.ipv6_route === 'off')
+			routing.push(E('span', { 'class': 'cbi-value-description' }, _('IPv6: not routed')));
+		if (c.ipv6_route === 'auto' && !c.route6_installed)
+			routing.push(E('span', { 'class': 'cbi-value-description' }, _('IPv6: auto (no route needed)')));
+		dom.content(ref.route, routing);
+
+		lastTest = this.lastTest[c.section];
+		if (lastTest && lastTest.ok === true)
+			dom.append(ref.route, E('div', { 'class': 'cbi-value-description' },
+				_('egress test: %s %s').format(String(lastTest.warp).toUpperCase(), dash(lastTest.ip))));
+
+		ref.btnStart.disabled = !!c.running;
+		ref.btnStop.disabled = !c.running;
+		ref.btnRestart.disabled = false;
+	},
+
+	updateConnections: function() {
 		var self = this;
+		var conns = (this.status && this.status.connections) || [];
+		var ids = conns.map(function(c) { return c.section; });
 
-		this.regNameInput = E('input', {
-			'class': 'cbi-input-text',
-			'type': 'text',
-			'style': 'width:18em',
-			'placeholder': _('OpenWrt router')
-		});
+		if (JSON.stringify(ids) !== JSON.stringify(this.rowIds || [])) {
+			this.rowIds = ids;
+			this.rowRefs = {};
+			dom.content(this.statusBody, null);
+			conns.forEach(function(c) {
+				self.rowRefs[c.section] = self.buildRow(c.section);
+				dom.append(self.statusBody, self.rowRefs[c.section].tr);
+			});
+		}
+		conns.forEach(function(c) { self.updateRow(c); });
+		this.elNoConns.style.display = conns.length ? 'none' : '';
+	},
 
-		this.regTos = E('input', { 'type': 'checkbox' });
+	/* ---------------------------------------------------------------------
+	 * configuration form
+	 * ------------------------------------------------------------------ */
 
-		this.btnGenerate = E('button', {
-			'class': 'cbi-button cbi-button-positive important',
-			'click': ui.createHandlerFn(this, 'handleRegister')
-		}, _('Generate WARP configuration'));
+	buildForm: function(map) {
+		var self = this;
+		var o, g;
 
-		this.cfgWarn = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
-		this.btnDeleteInvalid = E('button', {
-			'class': 'cbi-button cbi-button-negative',
-			'style': 'display:none',
-			'click': ui.createHandlerFn(this, 'handleDeleteConfig')
-		}, _('Delete configuration file'));
+		/* --- global settings ------------------------------------------- */
+		var sg = map.section(form.NamedSection, 'settings', 'settings', _('Global settings'));
 
-		this.noCfgBox = E('div', {}, [
-			E('div', { 'class': 'alert-message notice' }, [
-				E('h4', {}, _('No WARP configuration')),
-				E('p', {}, _('usque needs a WARP account. Registering creates /etc/usque/warp0.json with a private key and the assigned WARP addresses. Registration talks to Cloudflare directly and takes a few seconds.'))
-			]),
-			this.cfgWarn,
-			E('div', { 'style': 'margin:0.5em 0' }, [ this.btnDeleteInvalid ]),
-			valueRow(_('Device name'), this.regNameInput,
-				_('Optional. Shown on the Cloudflare WARP dashboard; leave empty to let usque pick a default name.')),
-			valueRow(_('Terms of Service'), E('label', {}, [
-				this.regTos, ' ',
-				_('I accept the '),
-				E('a', { 'href': TOS_URL, 'target': '_blank', 'rel': 'noopener' }, _('Cloudflare WARP Terms of Service')),
-				'.'
-			])),
-			valueRow('', E('div', {}, [ this.btnGenerate ]),
-				_('The registration is done by usque itself; the WARP private key never leaves the router and is never shown in this interface.'))
-		]);
+		o = sg.option(form.Flag, 'lan_ipv6', _('Provide IPv6 to LAN hosts (NAT66 through the tunnel)'));
+		o.default = '0';
+		o.rmempty = false;
+		o.description = _('Announce a ULA /64 on the LAN via router advertisements and NAT66 it through a tunnel. Only effective when a connection is enabled with IPv6 on and ipv6_route=auto or always, i.e. when the tunnel provides the IPv6 default route. The init script sets network.globals.ula_prefix, lan IPv6 addressing and dhcp.lan.ra="server" when needed; disabling it leaves the existing configuration in place.');
 
-		this.accId = code();
-		this.accV4 = code();
-		this.accV6 = code();
-		this.accEndpoint = E('span');
-		this.accPath = code();
-		this.accPerm = E('span', { 'class': 'cbi-value-description' });
-		this.btnFixPerms = E('button', {
-			'class': 'cbi-button cbi-button-apply',
-			'style': 'display:none',
-			'click': ui.createHandlerFn(this, 'handleFixPermissions')
-		}, _('Fix permissions (chmod 600)'));
+		o = sg.option(form.Value, 'lan_ipv6_prefix', _('LAN IPv6 prefix'));
+		o.default = '';
+		o.optional = true;
+		o.datatype = 'cidr6';
+		o.placeholder = 'fdd0:1234:5678:1::/64';
+		o.description = _('Optional /64 prefix used for the LAN ULA. Empty = derive one from the existing network.globals.ula_prefix (or generate a stable one).');
 
-		this.btnReRegister = E('button', {
-			'class': 'cbi-button cbi-button-reset',
-			'click': ui.createHandlerFn(this, 'handleReRegister')
-		}, _('Re-register (new device)'));
+		/* --- connections ----------------------------------------------- */
+		g = map.section(form.GridSection, 'usque', _('Connections'));
+		this.grid = g;
+		g.anonymous = true;
+		g.addremove = true;
+		g.sortable = false;
+		g.description = _('Each section is one independent tunnel with its own interface, configuration file and state. Routing is opt-in: "Install default route" is OFF by default; the IPv6 default route is only installed by ipv6_route when no other IPv6 default exists (auto) or always.');
 
-		this.btnDelete = E('button', {
-			'class': 'cbi-button cbi-button-negative',
-			'click': ui.createHandlerFn(this, 'handleDeleteConfig')
-		}, _('Delete configuration'));
+		g.sectiontitle = function(sid) {
+			var iface = uci.get('usque', sid, 'interface');
+			var mode = uci.get('usque', sid, 'mode') || 'cloudflare';
+			return (iface || sid) + (mode === 'custom' ? ' (' + _('custom') + ')' : '');
+		};
 
-		this.hasCfgBox = E('div', { 'style': 'display:none' }, [
-			valueRow(_('WARP device ID'), [ this.accId ]),
-			valueRow(_('WARP IPv4'), [ this.accV4 ]),
-			valueRow(_('WARP IPv6'), [ this.accV6 ]),
-			valueRow(_('Endpoints'), [ this.accEndpoint ]),
-			valueRow(_('Configuration file'), [ this.accPath, ' ', this.accPerm, ' ', this.btnFixPerms ]),
-			valueRow(_('Account actions'), E('div', {}, [ this.btnReRegister, ' ', this.btnDelete ]),
-				_('Re-registering registers a new device with Cloudflare and overwrites the configuration file. Deleting the configuration stops the service and removes the file.'))
-		]);
+		/* add: pre-fill a unique interface + config file */
+		g.handleAdd = function(ev) {
+			var config_name = this.uciconfig || this.map.config;
+			var sid = this.map.data.add(config_name, this.sectiontype, null);
+			var used = {}, next = 0, i, sections, iface;
+
+			sections = this.map.data.sections(config_name, this.sectiontype) || [];
+			for (i = 0; i < sections.length; i++) {
+				iface = this.map.data.get(config_name, sections[i]['.name'], 'interface');
+				if (iface)
+					used[iface] = true;
+			}
+			while (used['warp' + next])
+				next++;
+
+			this.map.data.set(config_name, sid, 'interface', 'warp' + next);
+			this.map.data.set(config_name, sid, 'config_file', '/etc/usque/warp' + next + '.json');
+
+			var mapNode = this.getPreviousModalMap();
+			var prevMap = mapNode ? dom.findClassInstance(mapNode) : this.map;
+			prevMap.addedSection = sid;
+			return this.renderMoreOptionsModal(sid);
+		};
+
+		/* remove: stop the instance, drop the section, commit, restart others */
+		g.handleRemove = function(sid) {
+			return self.handleRemoveConnection(sid);
+		};
+
+		o = g.option(form.Flag, 'enabled', _('Enabled'));
+		o.default = '0';
+		o.rmempty = false;
+		o.width = '6em';
+
+		o = g.option(form.Value, 'interface', _('Interface'));
+		o.default = 'warp0';
+		o.rmempty = false;
+		o.datatype = 'netdevname';
+		o.placeholder = 'warp0';
+		o.width = '6em';
+
+		o = g.option(form.ListValue, 'mode', _('Mode'));
+		o.default = 'cloudflare';
+		o.rmempty = false;
+		o.value('cloudflare', _('Cloudflare WARP'));
+		o.value('custom', _('Custom endpoint'));
+		o.width = '9em';
+
+		o = g.option(form.Flag, 'default_route', _('Default route'));
+		o.default = '0';
+		o.rmempty = false;
+		o.width = '5em';
+		o.description = _('Install the IPv4 default route via this tunnel (opt-in, default OFF). Disabled: traffic keeps using your WAN and the tunnel is only used by routes/policies you configure. Enabled: endpoint-bypass + default route + policy rule are installed on connect and removed on disconnect.');
+
+		o = g.option(form.ListValue, 'ipv6_route', _('IPv6 route'));
+		o.default = 'auto';
+		o.rmempty = false;
+		o.value('auto', _('auto'));
+		o.value('always', _('always'));
+		o.value('off', _('off'));
+		o.width = '6em';
+		o.description = _('auto = install an IPv6 default route through this tunnel only when the router has none (gives IPv6 to IPv4-only/CGNAT WANs). always = always install it (metric 0). off = never.');
+
+		o = g.option(form.Flag, 'ipv6', _('Enable IPv6 on this tunnel'));
+		o.default = '1';
+		o.rmempty = false;
+		o.modalonly = true;
+
+		o = g.option(form.Value, 'metric', _('Default route metric'));
+		o.default = '0';
+		o.rmempty = false;
+		o.datatype = 'uinteger';
+		o.placeholder = '0';
+		o.modalonly = true;
+		o.description = _('Metric of the installed default route (lower wins).');
+
+		o = g.option(form.Value, 'config_file', _('Configuration file'));
+		o.default = '/etc/usque/warp0.json';
+		o.rmempty = false;
+		o.datatype = 'file';
+		o.placeholder = '/etc/usque/warp0.json';
+		o.modalonly = true;
+
+		o = g.option(form.Value, 'mtu', _('MTU'));
+		o.default = '1400';
+		o.rmempty = false;
+		o.datatype = 'range(576,1500)';
+		o.placeholder = '1400';
+		o.modalonly = true;
+
+		o = g.option(form.Value, 'endpoint_port', _('Endpoint UDP port'));
+		o.default = '443';
+		o.rmempty = false;
+		o.datatype = 'port';
+		o.placeholder = '443';
+		o.modalonly = true;
+
+		o = g.option(form.Flag, 'always_reconnect', _('Always reconnect'));
+		o.default = '1';
+		o.rmempty = false;
+		o.modalonly = true;
+
+		o = g.option(form.Flag, 'auto_register', _('Auto-register if the config file is missing'));
+		o.default = '1';
+		o.rmempty = false;
+		o.modalonly = true;
+		o.depends('mode', 'cloudflare');
+
+		o = g.option(form.Value, 'device_name', _('Registration device name'));
+		o.default = '';
+		o.optional = true;
+		o.placeholder = _('OpenWrt router');
+		o.modalonly = true;
+		o.depends('mode', 'cloudflare');
+
+		o = g.option(form.Value, 'sni', _('TLS SNI (custom mode)'));
+		o.default = '';
+		o.optional = true;
+		o.placeholder = 'example.com';
+		o.modalonly = true;
+		o.depends('mode', 'custom');
+		o.description = _('Passed to usque as -s <sni> for non-Cloudflare endpoints. Leave empty to use the default.');
+
+		o = g.option(form.ListValue, 'log_level', _('Log level'));
+		o.default = 'info';
+		o.rmempty = false;
+		o.value('error', _('Error'));
+		o.value('warn', _('Warning'));
+		o.value('info', _('Info'));
+		o.value('debug', _('Debug'));
+		o.value('trace', _('Trace (verbose)'));
+		o.modalonly = true;
+
+		return map;
+	},
+
+	/* ---------------------------------------------------------------------
+	 * account / configuration-file section
+	 * ------------------------------------------------------------------ */
+
+	renderAccount: function() {
+		this.acctSel = E('select', { 'class': 'cbi-input-select' });
+		this.acctSel.addEventListener('change', function() {
+			this.accountSectionFor = null;
+			this.updateAccountSection();
+		}.bind(this));
+
+		this.acctBody = E('div', {});
 
 		this.regText = E('span', {}, '');
 		this.regOutput = E('pre', {
@@ -418,167 +618,199 @@ return view.extend({
 			])
 		]);
 
+		this.accountSectionFor = null;
+
 		return E('div', { 'class': 'cbi-section' }, [
-			E('h3', {}, _('WARP account')),
-			this.noCfgBox,
-			this.hasCfgBox,
+			E('h3', {}, _('Account / configuration file')),
+			E('div', { 'class': 'cbi-value' }, [
+				E('label', { 'class': 'cbi-value-title' }, _('Connection')),
+				E('div', { 'class': 'cbi-value-field' }, [ this.acctSel ])
+			]),
+			this.acctBody,
 			this.regBox
 		]);
 	},
 
-	updateAccount: function(st) {
-		var hasFile, valid, usable, endpoints;
+	updateAccountSection: function() {
+		var conns = (this.status && this.status.connections) || [];
+		var ids = conns.map(function(c) { return c.section; });
+		var current = this.acctSel.value;
 
-		if (!st || typeof st !== 'object')
+		if (JSON.stringify(ids) !== JSON.stringify(this.acctIds || [])) {
+			this.acctIds = ids;
+			this.accountSectionFor = null;
+			dom.content(this.acctSel, null);
+			conns.forEach(function(c) {
+				dom.append(this.acctSel, E('option', { 'value': c.section },
+					'%s (%s)'.format(c.iface || c.section, c.section)));
+			}, this);
+			if (ids.indexOf(current) !== -1)
+				this.acctSel.value = current;
+			else if (ids.length)
+				this.acctSel.value = ids[0];
+		}
+
+		var sid = this.acctSel.value;
+		if (!sid || (this.accountSectionFor === sid && !this.accountNeedsUpdate))
 			return;
 
-		hasFile = !!st.config_exists;
-		valid = !!st.config_valid;
-		usable = hasFile && valid;
+		this.accountSectionFor = sid;
+		this.accountNeedsUpdate = false;
+		this.renderAccountPanel(sid);
+	},
 
-		this.noCfgBox.style.display = usable ? 'none' : '';
-		this.hasCfgBox.style.display = usable ? '' : 'none';
+	renderAccountPanel: function(sid) {
+		var self = this;
+		var conn = this.connBySection(sid);
+		var nodes = [];
 
-		if (hasFile && !valid) {
-			this.cfgWarn.style.display = '';
-			this.cfgWarn.textContent = _('A configuration file exists at %s but it is not valid JSON. Re-generate the configuration or delete the broken file.').format(dash(st.config_path));
-			this.btnDeleteInvalid.style.display = '';
-		}
-		else {
-			this.cfgWarn.style.display = 'none';
-			this.btnDeleteInvalid.style.display = 'none';
-		}
-
-		if (!usable)
+		if (!conn) {
+			dom.content(this.acctBody, E('em', {}, _('No connection selected.')));
 			return;
+		}
 
-		this.accId.textContent = dash(st.device_id);
-		this.accV4.textContent = dash(st.warp_ipv4);
-		this.accV6.textContent = dash(st.warp_ipv6);
-		this.accPath.textContent = dash(st.config_path);
+		if (conn.mode === 'custom') {
+			nodes.push(E('div', { 'class': 'alert-message notice' }, [
+				E('h4', {}, _('Custom endpoint (non-Cloudflare)')),
+				E('p', {}, _('Paste a MASQUE/Connect-IP configuration JSON. Required fields: private_key, endpoint_v4, endpoint_pub_key (PEM) and ipv4; optional: ipv6, endpoint_v6. The file is written atomically with mode 600 and contains the private key — treat it as a secret.')),
+				E('p', {}, _('Use the connection options (Edit in the table above) to set a TLS SNI (-s) if your endpoint needs one.'))
+			]));
 
-		endpoints = [];
-		if (st.endpoint_v4)
-			endpoints.push(st.endpoint_v4);
-		if (st.endpoint_v6)
-			endpoints.push(st.endpoint_v6);
-		this.accEndpoint.textContent = endpoints.length ? endpoints.join(' · ') : '—';
+			this.importArea = E('textarea', {
+				'class': 'cbi-input-textarea',
+				'style': 'width:100%; min-height:12em; font-family:monospace; font-size:90%',
+				'placeholder': CONFIG_EXAMPLE,
+				'spellcheck': 'false'
+			});
 
-		if (!st.config_secure) {
-			setBadge(this.accPerm, _('permissions %s — the WARP private key is readable by other users').format(dash(st.config_mode)), 'important');
-			this.btnFixPerms.style.display = '';
+			nodes.push(valueRow(_('Configuration JSON'), this.importArea,
+				_('Required: private_key, endpoint_v4, endpoint_pub_key, ipv4. Optional: ipv6, endpoint_v6.')));
+			nodes.push(valueRow(_('Import'), E('div', {}, [
+				E('button', {
+					'class': 'cbi-button cbi-button-positive important',
+					'click': ui.createHandlerFn(this, 'handleImport')
+				}, _('Write configuration file'))
+			])));
 		}
 		else {
-			this.accPerm.className = 'cbi-value-description';
-			this.accPerm.textContent = '';
-			this.btnFixPerms.style.display = 'none';
+			/* Cloudflare mode */
+			this.regNameInput = E('input', {
+				'class': 'cbi-input-text',
+				'type': 'text',
+				'style': 'width:18em',
+				'placeholder': _('OpenWrt router')
+			});
+			this.regTos = E('input', { 'type': 'checkbox' });
+
+			if (conn.config_exists && conn.config_valid) {
+				nodes.push(E('div', { 'class': 'alert-message success' }, [
+					E('h4', {}, _('WARP account registered')),
+					E('p', {}, _('A configuration file exists for this connection. If the tunnel does not come up, check the log and the device registration.'))
+				]));
+			}
+			else if (conn.config_exists) {
+				nodes.push(E('div', { 'class': 'alert-message warning' },
+					_('The configuration file exists but is not valid JSON. Delete it and generate/import a new one.')));
+			}
+			else {
+				nodes.push(E('div', { 'class': 'alert-message notice' }, [
+					E('h4', {}, _('No WARP configuration yet')),
+					E('p', {}, _('Registering creates the configuration file for this connection with a private key and the assigned WARP addresses. Registration talks to Cloudflare directly.'))
+				]));
+				nodes.push(valueRow(_('Device name'), this.regNameInput,
+					_('Optional. Shown on the Cloudflare WARP dashboard; leave empty for the default name.')));
+				nodes.push(valueRow(_('Terms of Service'), E('label', {}, [
+					this.regTos, ' ',
+					_('I accept the '),
+					E('a', { 'href': TOS_URL, 'target': '_blank', 'rel': 'noopener' }, _('Cloudflare WARP Terms of Service')),
+					'.'
+				])));
+				nodes.push(valueRow(_('Register'), E('div', {}, [
+					E('button', {
+						'class': 'cbi-button cbi-button-positive important',
+						'click': ui.createHandlerFn(this, 'handleGenerate')
+					}, _('Generate WARP configuration'))
+				])));
+			}
 		}
+
+		/* shared config summary */
+		var summary = [];
+		summary.push(valueRow(_('Configuration file'), [ code(conn.config_file) ]));
+		summary.push(valueRow(_('File state'), [
+			conn.config_exists
+				? badge(_('present'), 'success')
+				: badge(_('missing'), 'warning'),
+			' ',
+			(code(conn.config_mode)),
+			conn.config_exists && !conn.config_secure ? E('span', {}, [ ' ', badge(_('readable by other users'), 'important') ]) : ''
+		]));
+
+		if (conn.config_exists && conn.config_valid) {
+			summary.push(valueRow(_('WARP device ID'), code(conn.device_id)));
+			summary.push(valueRow(_('WARP IPv4'), code(conn.warp_ipv4)));
+			summary.push(valueRow(_('WARP IPv6'), code(conn.warp_ipv6)));
+			summary.push(valueRow(_('Endpoints'), E('span', {},
+				dash([ conn.endpoint_v4, conn.endpoint_v6 ].filter(function(v) { return v; }).join(' · ')))));
+		}
+		else if (conn.config_exists) {
+			summary.push(valueRow(_('WARP device ID'), E('em', {}, _('configuration file is not valid JSON'))));
+		}
+
+		/* actions */
+		var actions = [];
+		if (conn.mode === 'cloudflare' && conn.config_exists)
+			actions.push(E('button', {
+				'class': 'cbi-button cbi-button-reset',
+				'click': ui.createHandlerFn(this, 'handleReRegister')
+			}, _('Re-register (new device)')));
+		if (conn.config_exists)
+			actions.push(E('button', {
+				'class': 'cbi-button cbi-button-negative',
+				'click': ui.createHandlerFn(this, 'handleDeleteConfig')
+			}, _('Delete configuration')));
+		if (conn.config_exists && !conn.config_secure)
+			actions.push(E('button', {
+				'class': 'cbi-button cbi-button-apply',
+				'click': ui.createHandlerFn(this, 'handleFixPermissions')
+			}, _('Fix permissions (chmod 600)')));
+		if (actions.length) {
+			var wrap = [];
+			actions.forEach(function(btn) { wrap.push(btn, ' '); });
+			summary.push(valueRow(_('Actions'), E('div', {}, wrap)));
+		}
+
+		for (var i = 0; i < summary.length; i++)
+			nodes.push(summary[i]);
+
+		dom.content(this.acctBody, E('div', {}, nodes));
 	},
 
 	/* ---------------------------------------------------------------------
-	 * configuration form
+	 * diagnostics
 	 * ------------------------------------------------------------------ */
 
-	buildForm: function(map) {
-		var s = map.section(form.NamedSection, 'main', 'usque', _('Configuration'));
-		var o;
-
-		o = s.option(form.Flag, 'enabled', _('Enable usque service'));
-		o.default = '0';
-		o.rmempty = false;
-		o.description = _('Master switch: the init script only starts usque when this is checked. Save & Apply also updates the boot symlink (/etc/init.d/usque enable) and restarts the service.');
-
-		o = s.option(form.Flag, 'auto_register', _('Auto-register if no configuration exists'));
-		o.default = '1';
-		o.rmempty = false;
-		o.description = _('The init script registers a WARP account on start if the configuration file is missing.');
-
-		o = s.option(form.Value, 'device_name', _('Registration device name'));
-		o.default = '';
-		o.optional = true;
-		o.placeholder = _('OpenWrt router');
-		o.description = _('Used by the auto-registration on boot. Leave empty for the default name.');
-
-		o = s.option(form.Value, 'config_file', _('Configuration file'));
-		o.default = '/etc/usque/warp0.json';
-		o.rmempty = false;
-		o.datatype = 'file';
-		o.placeholder = '/etc/usque/warp0.json';
-		o.description = _('WARP configuration written by the registration (contains the private key, mode 600).');
-
-		o = s.option(form.Value, 'interface', _('Tunnel interface'));
-		o.default = 'warp0';
-		o.rmempty = false;
-		o.datatype = 'netdevname';
-		o.placeholder = 'warp0';
-		o.description = _('Name of the TUN interface created by usque (max. 15 characters, letters, digits, ".", "_", "-").');
-
-		o = s.option(form.Value, 'mtu', _('MTU'));
-		o.default = '1400';
-		o.rmempty = false;
-		o.datatype = 'range(576,1500)';
-		o.placeholder = '1400';
-
-		o = s.option(form.Value, 'endpoint_port', _('Endpoint port'));
-		o.default = '443';
-		o.rmempty = false;
-		o.datatype = 'port';
-		o.placeholder = '443';
-		o.description = _('UDP port used for MASQUE. Some networks only allow UDP/443.');
-
-		o = s.option(form.Flag, 'ipv6', _('Enable IPv6'));
-		o.default = '0';
-		o.rmempty = false;
-		o.description = _('Assign and route the WARP IPv6 address (only useful if the WAN has IPv6).');
-
-		o = s.option(form.Flag, 'always_reconnect', _('Always reconnect'));
-		o.default = '1';
-		o.rmempty = false;
-
-		o = s.option(form.ListValue, 'log_level', _('Log level'));
-		o.default = 'info';
-		o.rmempty = false;
-		o.value('error', _('Error'));
-		o.value('warn', _('Warning'));
-		o.value('info', _('Info'));
-		o.value('debug', _('Debug'));
-		o.value('trace', _('Trace (verbose)'));
-		o.description = _('Passed to usque as RUST_LOG. "debug" or "trace" is only recommended for troubleshooting.');
-
-		return s;
-	},
-
-	/* ---------------------------------------------------------------------
-	 * diagnostics section
-	 * ------------------------------------------------------------------ */
-
-	renderDiagnosticsSection: function() {
-		this.btnTestDiag = E('button', {
-			'class': 'cbi-button cbi-button-action',
-			'click': ui.createHandlerFn(this, 'handleTest')
-		}, _('Run egress test'));
-
-		this.btnRefreshLogs = E('button', {
-			'class': 'cbi-button',
-			'click': ui.createHandlerFn(this, 'handleRefreshLogs')
-		}, _('Refresh logs'));
-
-		this.testResult = E('div', {}, [ E('em', {}, _('No test has been run yet.')) ]);
-
-		this.logCount = E('span', { 'class': 'cbi-value-description' },
-			this.logs && this.logs.count ? _('%s entries').format(this.logs.count) : '');
-
+	renderDiagnostics: function() {
 		this.logPre = E('pre', {
 			'style': 'white-space:pre-wrap; font-size:90%; max-height:22em; overflow:auto; border:1px solid rgba(127,127,127,0.25); padding:0.4em; margin:0'
 		}, (this.logs && this.logs.lines) ? this.logs.lines : _('No usque log entries found.'));
+		this.logCount = E('span', { 'class': 'cbi-value-description' },
+			this.logs && this.logs.count ? _('%s entries').format(this.logs.count) : '');
 
 		return E('div', { 'class': 'cbi-section' }, [
 			E('h3', {}, _('Diagnostics')),
-			valueRow(_('Connection test'), E('div', {}, [ this.btnTestDiag ]),
-				_('Fetches https://www.cloudflare.com/cdn-cgi/trace through the tunnel when possible and reports the Cloudflare view of the connection (warp=on means the traffic really goes through WARP).')),
-			valueRow('', this.testResult),
-			valueRow(_('Log'), E('div', {}, [ E('div', {}, [ this.btnRefreshLogs, ' ', this.logCount ]), this.logPre ]),
-				_('Last entries matching "usque" from the system log (logread).')),
+			E('div', { 'class': 'cbi-map-descr' },
+				_('Per-connection egress tests are available in the connection table above (Test / Logs). The log below shows all usque entries.')),
+			valueRow(_('System log'), E('div', {}, [
+				E('div', {}, [
+					E('button', {
+						'class': 'cbi-button',
+						'click': ui.createHandlerFn(this, 'handleRefreshLogs')
+					}, _('Refresh logs')),
+					' ', this.logCount
+				]),
+				this.logPre
+			])),
 			E('div', { 'class': 'cbi-value' }, [
 				E('label', { 'class': 'cbi-value-title' }, _('Documentation')),
 				E('div', { 'class': 'cbi-value-field' }, [
@@ -591,11 +823,12 @@ return view.extend({
 	},
 
 	/* ---------------------------------------------------------------------
-	 * actions
+	 * live refresh
 	 * ------------------------------------------------------------------ */
 
 	refresh: function() {
 		var self = this;
+		var tasks;
 
 		if (!this.pollActive)
 			return Promise.resolve();
@@ -607,165 +840,204 @@ return view.extend({
 			return Promise.resolve();
 		}
 
-		var tasks = [ L.resolveDefault(callStatus(), null) ];
+		tasks = [ L.resolveDefault(callStatus(), null) ];
 		if (this.registering)
-			tasks.push(L.resolveDefault(callRegisterStatus(), null));
+			tasks.push(L.resolveDefault(callRegisterStatus(this.registering), null));
 
 		return Promise.all(tasks).then(function(res) {
 			if (res[0])
 				self.updateStatus(res[0]);
 			if (self.registering && res[1])
-				self.updateRegister(res[1]);
+				self.updateRegister(self.registering, res[1]);
 		});
 	},
 
-	handleStart: function() {
-		if (this.status && this.status.enabled !== true) {
-			ui.addNotification(_('Service is disabled'), E('p', {},
-				_('usque.main.enabled is 0, so /etc/init.d/usque will not start the tunnel. Enable "Enable usque service" above and press Save & Apply.')), 'warning');
-			return Promise.resolve();
-		}
-
-		if (this.status && this.status.config_exists !== true) {
-			ui.addNotification(_('No WARP configuration'), E('p', {},
-				_('Register a WARP device first ("Generate WARP configuration" above). Starting now would make the init script register synchronously and block the web interface.')), 'warning');
-			return Promise.resolve();
-		}
-
-		return this.doServiceAction('start');
-	},
-
-	handleStop: function() {
-		return this.doServiceAction('stop');
-	},
-
-	handleRestart: function() {
-		if (this.status && this.status.config_exists !== true) {
-			ui.addNotification(_('No WARP configuration'), E('p', {},
-				_('Register a WARP device first ("Generate WARP configuration" above).')), 'warning');
-			return Promise.resolve();
-		}
-
-		return this.doServiceAction('restart');
-	},
-
-	doServiceAction: function(action) {
-		var self = this;
-
-		return L.resolveDefault(callSetInitAction(action), null).then(function(res) {
-			if (!res || res.ok !== true)
-				ui.addNotification(_('Service control failed'), E('p', {}, errText(res)), 'danger');
-			else
-				ui.addNotification(_('usque'), E('p', {}, _('Service action "%s" completed.').format(action)), 'success');
-
-			return self.refresh();
-		});
-	},
-
-	handleTest: function() {
-		var self = this;
-		var iface = dash(this.status && this.status.iface);
-
-		dom.content(this.testResult, E('div', { 'class': 'spinning' },
-			_('Running egress test through %s…').format(iface)));
-
-		return L.resolveDefault(callTest(), null).then(function(res) {
-			if (res && res.ok === true)
-				self.lastTest = res;
-			self.renderTestResult(res);
-			return self.refresh();
-		});
-	},
-
-	renderTestResult: function(res) {
-		var nodes = [], warpCls;
-
-		if (!res || res.ok !== true) {
-			dom.content(this.testResult, E('div', { 'class': 'alert-message danger' }, [
-				E('strong', {}, _('Test failed')),
-				E('p', {}, errText(res))
-			]));
+	updateStatus: function(st) {
+		if (!st || typeof st !== 'object')
 			return;
-		}
 
-		warpCls = res.warp === 'on' ? 'success' : (res.warp === 'off' ? 'warning' : '');
-
-		nodes.push(valueRow(_('WARP'), badge(String(res.warp || 'unknown').toUpperCase(), warpCls)));
-		nodes.push(valueRow(_('Egress IP'), code(res.ip)));
-		nodes.push(valueRow(_('Cloudflare colo'), code(res.colo)));
-		nodes.push(valueRow(_('Location'), code(res.loc)));
-		nodes.push(valueRow(_('Timestamp'), code(res.timestamp)));
-		nodes.push(valueRow(_('Test method'), E('span', {},
-			dash(res.method) + (res.bound ? _(' (bound to the tunnel)') : _(' (not bound to the tunnel)')))));
-
-		if (!res.bound) {
-			nodes.push(E('div', { 'class': 'alert-message notice' },
-				_('The request could not be bound to the tunnel interface, so the address shown is the router\'s regular egress address. Start the service and make sure the default route uses the tunnel for a tunnel-bound test.')));
-		}
-
-		if (res.raw) {
-			nodes.push(E('details', {}, [
-				E('summary', {}, _('Raw trace')),
-				E('pre', { 'style': 'white-space:pre-wrap' }, res.raw)
-			]));
-		}
-
-		dom.content(this.testResult, E('div', {}, nodes));
+		this.status = st;
+		this.updateOverview();
+		this.updateConnections();
+		this.updateAccountSection();
 	},
 
-	handleRefreshLogs: function() {
-		var self = this;
+	connBySection: function(sid) {
+		var conns = (this.status && this.status.connections) || [];
+		for (var i = 0; i < conns.length; i++)
+			if (conns[i].section === sid)
+				return conns[i];
+		return null;
+	},
 
-		return L.resolveDefault(callLogs(), null).then(function(res) {
+	/* ---------------------------------------------------------------------
+	 * connection actions
+	 * ------------------------------------------------------------------ */
+
+	runInitAction: function(action, sid, okMessage) {
+		return L.resolveDefault(callSetInitAction(action, sid || ''), null).then(function(res) {
 			if (!res || res.ok !== true) {
-				self.logPre.textContent = errText(res);
-				self.logCount.textContent = '';
-				return;
+				ui.addNotification(_('Service control failed'), E('p', {}, errText(res)), 'danger');
 			}
-			self.logPre.textContent = res.lines || _('No usque log entries found.');
-			self.logCount.textContent = res.count ? _('%s entries').format(res.count) : '';
+			else {
+				ui.addNotification(_('usque'),
+					E('p', {}, okMessage || _('Action "%s" completed.').format(action)), 'success');
+			}
+			return null;
 		});
 	},
 
-	handleFixPermissions: function() {
+	handleStartSection: function(sid) {
+		var self = this;
+		var conn = this.connBySection(sid);
+
+		if (!conn || !conn.enabled) {
+			ui.addNotification(_('Connection is disabled'), E('p', {},
+				_('Enable "%s" in the connection table and use Save & Apply first; the init script does not start disabled connections.').format(sid)), 'warning');
+			return Promise.resolve();
+		}
+		if (!conn.config_exists) {
+			ui.addNotification(_('No configuration'), E('p', {},
+				_('Register a WARP device or import a configuration in the "Account / configuration file" section first; starting now would make the init script register synchronously and block the web interface.')), 'warning');
+			return Promise.resolve();
+		}
+
+		return this.runInitAction('start', sid, _('Connection "%s" start requested.').format(sid))
+			.then(function() { return self.refresh(); });
+	},
+
+	handleStopSection: function(sid) {
 		var self = this;
 
-		return L.resolveDefault(callFixPermissions(), null).then(function(res) {
-			if (!res || res.ok !== true)
-				ui.addNotification(_('chmod failed'), E('p', {}, errText(res)), 'danger');
-			else
-				ui.addNotification(_('Permissions fixed'), E('p', {},
-					_('The configuration file is now readable by root only.')), 'success');
+		return this.runInitAction('stop', sid, _('Connection "%s" stopped.').format(sid))
+			.then(function() { return self.refresh(); });
+	},
+
+	handleRestartSection: function(sid) {
+		var self = this;
+		var conn = this.connBySection(sid);
+
+		if (!conn || !conn.enabled) {
+			ui.addNotification(_('Connection is disabled'), E('p', {},
+				_('Enable "%s" in the connection table and use Save & Apply first.').format(sid)), 'warning');
+			return Promise.resolve();
+		}
+		if (!conn.config_exists) {
+			ui.addNotification(_('No configuration'), E('p', {},
+				_('Register a WARP device or import a configuration first.')), 'warning');
+			return Promise.resolve();
+		}
+
+		return this.runInitAction('restart', sid, _('Connection "%s" restarted.').format(sid))
+			.then(function() { return self.refresh(); });
+	},
+
+	handleTestSection: function(sid) {
+		var self = this;
+
+		return L.resolveDefault(callTest(sid), null).then(function(res) {
+			if (!res || res.ok !== true) {
+				ui.addNotification(_('Egress test failed — %s').format(sid),
+					E('p', {}, errText(res)), 'danger');
+			}
+			else {
+				self.lastTest[sid] = res;
+				ui.addNotification(_('Egress test — %s').format(sid),
+					E('div', {}, [
+						E('p', {}, _('WARP: %s · egress IP: %s · colo: %s').format(
+							String(res.warp || 'unknown').toUpperCase(), dash(res.ip), dash(res.colo))),
+						E('p', { 'class': 'cbi-value-description' },
+							res.bound
+								? _('The request was bound to the connection interface.')
+								: _('The request was not bound to the tunnel interface; the address shown is the router\'s regular egress address.'))
+					]), res.warp === 'on' ? 'success' : 'warning');
+			}
 			return self.refresh();
 		});
 	},
 
-	handleRegister: function() {
-		var name = (this.regNameInput.value || '').trim();
+	handleLogsSection: function(sid) {
+		return L.resolveDefault(callLogs(sid), null).then(function(res) {
+			var text = (res && res.ok === true)
+				? (res.lines || _('No log entries for this connection.'))
+				: errText(res);
 
-		if (!this.regTos.checked) {
+			ui.showModal(_('usque log — %s').format(sid), [
+				E('pre', {
+					'style': 'white-space:pre-wrap; max-height:60vh; overflow:auto; font-size:90%'
+				}, text),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Close'))
+				])
+			]);
+		});
+	},
+
+	handleRemoveConnection: function(sid) {
+		var self = this;
+
+		ui.showModal(_('Remove connection "%s"').format(sid), [
+			E('div', {}, [
+				E('p', {}, _('The connection is stopped and its UCI section is removed. The configuration file is kept on disk (delete it separately in "Account / configuration file" if you want to remove the WARP registration data).')),
+				E('div', { 'class': 'right', 'style': 'margin-top:1em' }, [
+					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')),
+					' ',
+					E('button', {
+						'class': 'cbi-button cbi-button-negative important',
+						'click': function() {
+							ui.hideModal();
+							var config_name = self.map.config;
+							L.resolveDefault(callSetInitAction('stop', sid), null).then(function() {
+								self.map.data.remove(config_name, sid);
+								return self.map.save(null, true);
+							}).then(function() {
+								return L.resolveDefault(callUciApply(10, false), null);
+							}).then(function() {
+								return L.resolveDefault(callSetInitAction('restart', ''), null);
+							}).then(function() {
+								ui.addNotification(_('Connection removed'),
+									E('p', {}, _('"%s" was removed and the service reloaded.').format(sid)), 'success');
+								return self.refresh();
+							}).catch(function(err) {
+								ui.addNotification(_('Remove failed'), E('p', {}, err.message || String(err)), 'danger');
+							});
+						}
+					}, _('Remove'))
+				])
+			])
+		]);
+	},
+
+	/* ---------------------------------------------------------------------
+	 * account actions
+	 * ------------------------------------------------------------------ */
+
+	handleGenerate: function() {
+		var sid = this.acctSel.value;
+		var name = (this.regNameInput && this.regNameInput.value || '').trim();
+
+		if (!this.regTos || !this.regTos.checked) {
 			ui.addNotification(_('Terms of Service'), E('p', {},
 				_('You must accept the Cloudflare WARP Terms of Service before registering a device.')), 'warning');
-			return;
+			return Promise.resolve();
 		}
 
-		return this.beginRegistration(name);
+		return this.beginRegistration(sid, name);
 	},
 
 	handleReRegister: function() {
 		var self = this;
+		var sid = this.acctSel.value;
 		var nameInput = E('input', {
-			'class': 'cbi-input-text',
-			'type': 'text',
-			'style': 'width:18em',
+			'class': 'cbi-input-text', 'type': 'text', 'style': 'width:18em',
 			'placeholder': _('OpenWrt router')
 		});
 		var tos = E('input', { 'type': 'checkbox' });
 		var alertBox = E('div', { 'class': 'alert-message warning', 'style': 'display:none' });
 
-		ui.showModal(_('Re-register this device'), [
+		ui.showModal(_('Re-register "%s"').format(sid), [
 			E('div', {}, [
-				E('p', {}, _('A new WARP device will be registered with Cloudflare and the existing configuration file will be overwritten. Repeated registrations may count against the WARP device limit of the account.')),
+				E('p', {}, _('A new WARP device will be registered with Cloudflare and the configuration file of this connection will be overwritten. Repeated registrations may count against the WARP device limit of the account.')),
 				valueRow(_('Device name'), nameInput, _('Optional.')),
 				E('label', {}, [
 					tos, ' ',
@@ -786,7 +1058,7 @@ return view.extend({
 								return;
 							}
 							ui.hideModal();
-							self.beginRegistration((nameInput.value || '').trim());
+							self.beginRegistration(sid, (nameInput.value || '').trim());
 						}
 					}, _('Re-register'))
 				])
@@ -794,12 +1066,41 @@ return view.extend({
 		]);
 	},
 
+	handleImport: function() {
+		var self = this;
+		var sid = this.acctSel.value;
+		var text = (this.importArea && this.importArea.value || '').trim();
+
+		if (!text) {
+			ui.addNotification(_('Nothing to import'), E('p', {}, _('Paste a configuration JSON first.')), 'warning');
+			return Promise.resolve();
+		}
+		if (text.charAt(0) !== '{') {
+			ui.addNotification(_('Invalid configuration'), E('p', {}, _('The configuration must be a JSON object starting with "{" and ending with "}".')), 'warning');
+			return Promise.resolve();
+		}
+
+		return L.resolveDefault(callImportConfig(sid, text), null).then(function(res) {
+			if (!res || res.ok !== true) {
+				ui.addNotification(_('Import failed'), E('p', {}, errText(res)), 'danger');
+				return;
+			}
+			if (self.importArea)
+				self.importArea.value = '';
+			ui.addNotification(_('Configuration imported'),
+				E('p', {}, _('The configuration file for "%s" was written with mode 600.').format(sid)), 'success');
+			self.accountNeedsUpdate = true;
+			return self.refresh();
+		});
+	},
+
 	handleDeleteConfig: function() {
 		var self = this;
+		var sid = this.acctSel.value;
 
-		ui.showModal(_('Delete WARP configuration'), [
+		ui.showModal(_('Delete configuration of "%s"').format(sid), [
 			E('div', {}, [
-				E('p', {}, _('This removes %s and stops the usque service. The device registration itself remains on the Cloudflare side; registering again creates a new device.').format(dash(this.status && this.status.config_path))),
+				E('p', {}, _('This removes the configuration file and stops the connection. The device registration itself remains on the Cloudflare side; registering again creates a new device.')),
 				E('div', { 'class': 'right', 'style': 'margin-top:1em' }, [
 					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, _('Cancel')),
 					' ',
@@ -807,12 +1108,13 @@ return view.extend({
 						'class': 'cbi-button cbi-button-negative important',
 						'click': function() {
 							ui.hideModal();
-							L.resolveDefault(callDeleteConfig(), null).then(function(res) {
+							L.resolveDefault(callDeleteConfig(sid), null).then(function(res) {
 								if (!res || res.ok !== true)
 									ui.addNotification(_('Delete failed'), E('p', {}, errText(res)), 'danger');
 								else
-									ui.addNotification(_('WARP configuration deleted'), E('p', {},
-										_('The configuration file was removed and the service was stopped.')), 'success');
+									ui.addNotification(_('Configuration deleted'),
+										E('p', {}, _('The configuration file was removed and the connection stopped.')), 'success');
+								self.accountNeedsUpdate = true;
 								return self.refresh();
 							});
 						}
@@ -822,41 +1124,70 @@ return view.extend({
 		]);
 	},
 
-	beginRegistration: function(name) {
+	handleFixPermissions: function() {
+		var self = this;
+		var sid = this.acctSel.value;
+
+		return L.resolveDefault(callFixPermissions(sid), null).then(function(res) {
+			if (!res || res.ok !== true)
+				ui.addNotification(_('chmod failed'), E('p', {}, errText(res)), 'danger');
+			else
+				ui.addNotification(_('Permissions fixed'),
+					E('p', {}, _('The configuration file is now readable by root only.')), 'success');
+			self.accountNeedsUpdate = true;
+			return self.refresh();
+		});
+	},
+
+	handleRefreshLogs: function() {
 		var self = this;
 
-		this.registering = true;
+		return L.resolveDefault(callLogs(''), null).then(function(res) {
+			if (!res || res.ok !== true) {
+				self.logPre.textContent = errText(res);
+				self.logCount.textContent = '';
+				return;
+			}
+			self.logPre.textContent = res.lines || _('No usque log entries found.');
+			self.logCount.textContent = res.count ? _('%s entries').format(res.count) : '';
+		});
+	},
+
+	beginRegistration: function(sid, name) {
+		var self = this;
+
+		if (!sid) {
+			ui.addNotification(_('No connection selected'), E('p', {}, _('Select a connection first.')), 'warning');
+			return Promise.resolve();
+		}
+
+		this.registering = sid;
 		this.regT0 = Date.now();
 		this.regText.textContent = _('Requesting a WARP registration from Cloudflare…');
 		this.regOutput.textContent = '';
 		this.regOutput.style.display = 'none';
 		this.regBox.style.display = '';
-		this.btnGenerate.disabled = true;
 
-		return L.resolveDefault(callRegister(name, true), null).then(function(res) {
+		return L.resolveDefault(callRegister(sid, name, true), null).then(function(res) {
 			if (!res || res.ok !== true) {
-				self.registering = false;
-				self.btnGenerate.disabled = false;
+				self.registering = null;
 				self.regBox.style.display = 'none';
 				ui.addNotification(_('Registration failed'), E('p', {}, errText(res)), 'danger');
 				return;
 			}
-
-			/* the rpcd method returned immediately; poll registerStatus */
 			self.regText.textContent = _('Registering with Cloudflare…');
 			return self.refresh();
 		});
 	},
 
-	updateRegister: function(res) {
+	updateRegister: function(sid, res) {
 		var elapsed;
 
-		if (!this.registering)
+		if (!this.registering || this.registering !== sid)
 			return;
 
 		if (!res || res.ok !== true) {
-			this.registering = false;
-			this.btnGenerate.disabled = false;
+			this.registering = null;
 			this.regBox.style.display = 'none';
 			ui.addNotification(_('Registration failed'), E('p', {}, errText(res)), 'danger');
 			return;
@@ -865,7 +1196,7 @@ return view.extend({
 		elapsed = res.elapsed > 0 ? res.elapsed : Math.round((Date.now() - (this.regT0 || Date.now())) / 1000);
 
 		if (!res.done) {
-			this.regText.textContent = _('Registering with Cloudflare… %s').format(fmtDuration(elapsed));
+			this.regText.textContent = _('Registering "%s" with Cloudflare… %s').format(sid, fmtDuration(elapsed));
 			if (res.output) {
 				this.regOutput.style.display = '';
 				this.regOutput.textContent = res.output;
@@ -873,13 +1204,13 @@ return view.extend({
 			return;
 		}
 
-		this.registering = false;
-		this.btnGenerate.disabled = false;
+		this.registering = null;
 
 		if (res.rc === 0) {
 			this.regBox.style.display = 'none';
-			ui.addNotification(_('WARP configuration created'), E('p', {},
-				_('Enable the service and press Start to connect.')), 'success');
+			ui.addNotification(_('WARP configuration created'),
+				E('p', {}, _('Enable the connection in the table and press Save & Apply, then Start.')), 'success');
+			this.accountNeedsUpdate = true;
 			return this.refresh();
 		}
 
@@ -892,7 +1223,7 @@ return view.extend({
 			this.regOutput.textContent = res.output;
 		}
 		ui.addNotification(_('Registration failed'), E('p', {},
-			_('See the output in the WARP account section.')), 'danger');
+			_('See the output in the "Account / configuration file" section.')), 'danger');
 		return this.refresh();
 	},
 
@@ -900,38 +1231,50 @@ return view.extend({
 	 * save / apply
 	 * ------------------------------------------------------------------ */
 
+	handleSaveApply: function(ev) {
+		var self = this;
+
+		/* 1. stage the form values in the uci session (View.handleSave)
+		 * 2. commit them (uci apply) so the init script sees them
+		 * 3. sync the boot symlink and restart the service
+		 * 4. drop the "unsaved changes" indicator */
+		return this.super('handleSave', [ ev ])
+			.then(function() { return callUciApply(10, false); })
+			.then(function() { return self.applyServiceState(); })
+			.then(function() {
+				if (ui.changes && typeof(ui.changes.setIndicator) === 'function')
+					ui.changes.setIndicator(0);
+			})
+			.catch(function(err) {
+				ui.addNotification(_('Save failed'), E('p', {}, err.message || String(err)), 'danger');
+				return self.refresh();
+			});
+	},
 
 	applyServiceState: function() {
 		var self = this;
-		var rawEnabled = uci.get('usque', 'main', 'enabled');
-		var enabled = (rawEnabled != null) ? parseBool(rawEnabled) : null;
+		var sections = uci.sections('usque', 'usque') || [];
+		var anyEnabled = false, missingConfig = [], conn;
 
-		/* ask the backend instead of trusting possibly stale polled state */
-		return L.resolveDefault(callGetConfig(), null).then(function(cfg) {
-			return self.applyServiceStateWithConfig(enabled, !!(cfg && cfg.ok === true && cfg.exists === true));
-		})['catch'](function(err) {
-			ui.addNotification(_('Service control failed'), E('p', {}, err.message || String(err)), 'danger');
+		sections.forEach(function(s) {
+			if (parseBool(s.enabled))
+				anyEnabled = true;
 		});
-	},
 
-	applyServiceStateWithConfig: function(enabled, haveConfig) {
-		var self = this;
+		/* connections that are enabled but still lack a config file are skipped:
+		 * the init script would register them synchronously and block this RPC */
+		for (var i = 0; i < sections.length; i++) {
+			if (!parseBool(sections[i].enabled))
+				continue;
+			conn = this.connBySection(sections[i]['.name']);
+			if (conn && conn.config_exists === false)
+				missingConfig.push(sections[i]['.name']);
+		}
+
 		var tasks = [];
-
-		if (enabled === true)
-			tasks.push(callSetInitAction('enable'));
-		else if (enabled === false)
-			tasks.push(callSetInitAction('disable'));
-
-		if (enabled === false) {
-			tasks.push(callSetInitAction('stop'));
-		}
-		else if (haveConfig) {
-			tasks.push(callSetInitAction('restart'));
-		}
-		/* enabled but no config: do not start yet, the init script would
-		 * register a device synchronously (blocking this call for up to a
-		 * minute); the registration UI or the next boot handles that. */
+		tasks.push(callSetInitAction(anyEnabled ? 'enable' : 'disable', ''));
+		if (anyEnabled && !missingConfig.length)
+			tasks.push(callSetInitAction('restart', ''));
 
 		return tasks.reduce(function(chain, task) {
 			return chain.then(function() {
@@ -941,12 +1284,12 @@ return view.extend({
 				});
 			});
 		}, Promise.resolve()).then(function() {
-			if (enabled !== false && !haveConfig)
+			if (anyEnabled && missingConfig.length)
 				ui.addNotification(_('Configuration saved'), E('p', {},
-					_('No WARP configuration yet: use "Generate WARP configuration" first, or let the init script register a device on the next start (auto_register).')), 'warning');
-			else if (enabled === false)
+					_('Connection(s) %s are enabled but have no configuration yet: register or import a configuration first; the service was not restarted to avoid blocking the web interface.').format(missingConfig.join(', '))), 'warning');
+			else if (!anyEnabled)
 				ui.addNotification(_('Configuration saved'), E('p', {},
-					_('usque was stopped and disabled (enabled=0).')), 'success');
+					_('No connection is enabled, the usque service was stopped and disabled.')), 'success');
 			else
 				ui.addNotification(_('Configuration saved'), E('p', {},
 					_('usque was restarted with the new configuration.')), 'success');
@@ -954,26 +1297,5 @@ return view.extend({
 		}).catch(function(err) {
 			ui.addNotification(_('Service control failed'), E('p', {}, err.message || String(err)), 'danger');
 		});
-	},
-
-	handleSaveApply: function(ev) {
-		var self = this;
-
-		/* 1. stage the form values in the uci session (View.handleSave)
-		 * 2. commit them (uci apply) so the init script sees them
-		 * 3. enable/disable + restart the service
-		 * 4. drop the "unsaved changes" indicator */
-		return this.super('handleSave', [ ev ])
-			.then(function() { return callUciApply(10, false); })
-			.then(function() { return self.applyServiceState(); })
-			.then(function() {
-				/* everything is committed now, drop the stale change badge */
-				if (ui.changes && typeof(ui.changes.setIndicator) === 'function')
-					ui.changes.setIndicator(0);
-			})
-			.catch(function(err) {
-				ui.addNotification(_('Save failed'), E('p', {}, err.message || String(err)), 'danger');
-				return self.refresh();
-			});
 	}
 });

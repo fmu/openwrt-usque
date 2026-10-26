@@ -1,22 +1,47 @@
 #!/bin/sh
-# luci.usque - rpcd backend for luci-app-usque (LuCI for usque / Cloudflare WARP)
+# luci.usque - rpcd backend for luci-app-usque (multi-connection, v2)
 #
-# Plain /bin/sh + jshn (libubox) + uci/jsonfilter/ip/logread: no dependencies
-# beyond what a base OpenWrt 25.12 system already provides.
+# Plain /bin/sh + jshn (libubox) + uci/ip/logread: no dependencies beyond what a
+# base OpenWrt 25.12 system already provides.
 #
-# References:
+# UCI model (owned by the usque package):
+#   /etc/config/usque:
+#     config settings 'settings'
+#       option lan_ipv6 '0'
+#       option lan_ipv6_prefix ''
+#     config usque 'warp0'
+#       option enabled '1'
+#       option mode 'cloudflare'          # or "custom"
+#       option config_file '/etc/usque/warp0.json'
+#       option interface 'warp0'
+#       option mtu '1400'
+#       option ipv6 '1'
+#       option ipv6_route 'auto'          # auto | always | off
+#       option default_route '0'          # opt-in! default path is not touched
+#       option metric '0'
+#       option endpoint_port '443'
+#       option always_reconnect '1'
+#       option auto_register '1'
+#       option device_name ''
+#       option log_level 'info'
+#       option sni ''                     # custom mode only (-s)
+#
+# Methods:
 #   ubus -v list luci.usque
 #   ubus -S call luci.usque status
-#   ubus -S call luci.usque getConfig
-#   ubus -S call luci.usque register '{"name":"router","accept_tos":true}'
-#   ubus -S call luci.usque registerStatus
-#   ubus -S call luci.usque setInitAction '{"action":"restart"}'
-#   ubus -S call luci.usque test
-#   ubus -S call luci.usque logs
-#   ubus -S call luci.usque deleteConfig
+#   ubus -S call luci.usque getConfig '{"section":"warp0"}'
+#   ubus -S call luci.usque register '{"section":"warp0","name":"router","accept_tos":true}'
+#   ubus -S call luci.usque registerStatus '{"section":"warp0"}'
+#   ubus -S call luci.usque importConfig '{"section":"warp1","json":"{...}"}'
+#   ubus -S call luci.usque deleteConfig '{"section":"warp1"}'
+#   ubus -S call luci.usque setInitAction '{"action":"restart","section":"warp0"}'
+#   ubus -S call luci.usque test '{"section":"warp0"}'
+#   ubus -S call luci.usque logs '{"section":"warp0"}'
+#   ubus -S call luci.usque fixConfigPermissions '{"section":"warp0"}'
 #
-# Never expose private_key/access_token: getConfig only picks public fields and
-# registration output is redacted before it leaves this script.
+# Never expose private_key/access_token: getConfig/status/importConfig only
+# report public fields and registration output is redacted before it leaves
+# this script.
 
 . /usr/share/libubox/jshn.sh 2>/dev/null || {
 	# Without jshn there is nothing we can do; still answer in valid JSON.
@@ -26,17 +51,15 @@
 
 USQUE_BIN="${USQUE_BIN:-/usr/bin/usque}"
 INIT_SCRIPT="${INIT_SCRIPT:-/etc/init.d/usque}"
-DEFAULT_CONFIG="/etc/usque/warp0.json"
+UCI_CONFIG="${UCI_CONFIG:-usque}"
+DEFAULT_CONFIG_DIR="/etc/usque"
 
 RUN_DIR="/tmp/luci-usque"
-REG_LOG="$RUN_DIR/register.log"
-REG_DONE="$RUN_DIR/register.done"
-REG_PIDFILE="$RUN_DIR/register.pid"
-REG_STARTED="$RUN_DIR/register.started"
-REG_TIMEOUT_MARK="$RUN_DIR/register.timeout"
 REG_TIMEOUT=90
 
 TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
+
+IMPORT_TMP=""
 
 umask 077
 
@@ -63,16 +86,16 @@ json_add_bool() {
 }
 
 json_add_str() {
-	# json_add_str <name> <value> - always a JSON string, empty values included
+	# always emits a JSON string, also for empty values
 	json_add_string "$1" "$2"
 }
 
-# ---------------------------------------------------------------------------
-# small helpers
-# ---------------------------------------------------------------------------
-
-uci_get() {
-	uci -q get "usque.main.$1" 2>/dev/null
+json_add_uint() {
+	# json_add_uint <name> <value> - clamps to 0 when not a plain integer
+	case "$2" in
+		''|*[!0-9]*) json_add_int "$1" 0 ;;
+		*) json_add_int "$1" "$2" ;;
+	esac
 }
 
 bool_val() {
@@ -82,51 +105,94 @@ bool_val() {
 	esac
 }
 
-config_path() {
+# ---------------------------------------------------------------------------
+# UCI helpers
+# ---------------------------------------------------------------------------
+
+uci_opt() {
+	# uci_opt <section> <option>
+	uci -q get "$UCI_CONFIG.$1.$2" 2>/dev/null
+}
+
+uci_glob() {
+	# uci_glob <option> for the global "settings" section
+	uci -q get "$UCI_CONFIG.settings.$1" 2>/dev/null
+}
+
+section_list() {
+	# all UCI sections of type "usque", in file order
+	uci -q show "$UCI_CONFIG" 2>/dev/null | \
+		sed -n "s/^$UCI_CONFIG\.\([^.=]\{1,\}\)=$UCI_CONFIG\$/\1/p"
+}
+
+section_valid() {
+	case "$1" in
+		''|*[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	return 0
+}
+
+section_known() {
+	section_valid "$1" && section_list | grep -qx "$1"
+}
+
+section_config_file() {
+	# absolute path of the WARP config JSON for a section
 	local f
 
-	f="$(uci_get config_file)"
-	[ -n "$f" ] || f="$DEFAULT_CONFIG"
+	f="$(uci_opt "$1" config_file)"
+	[ -n "$f" ] || f="$DEFAULT_CONFIG_DIR/$1.json"
 	case "$f" in
 		/*) ;;
-		*) f="$DEFAULT_CONFIG" ;;
+		*) f="$DEFAULT_CONFIG_DIR/$1.json" ;;
 	esac
 	case "$f" in
-		*..*) f="$DEFAULT_CONFIG" ;;
+		*..*) f="$DEFAULT_CONFIG_DIR/$1.json" ;;
 	esac
 	printf '%s' "$f"
 }
 
-iface_name() {
+section_iface() {
 	local i
 
-	i="$(uci_get interface)"
-	[ -n "$i" ] || i="warp0"
+	i="$(uci_opt "$1" interface)"
+	[ -n "$i" ] || i="$1"
 	printf '%s' "$i"
 }
 
-# rc.common "enabled": is there an /etc/rc.d/S* symlink (start on boot)?
+section_mode() {
+	local m
+
+	m="$(uci_opt "$1" mode)"
+	case "$m" in
+		custom) printf 'custom' ;;
+		*) printf 'cloudflare' ;;
+	esac
+}
+
+section_enabled() {
+	bool_val "$(uci_opt "$1" enabled)"
+}
+
+# ---------------------------------------------------------------------------
+# generic system helpers
+# ---------------------------------------------------------------------------
+
 service_boot_enabled() {
 	[ -x "$INIT_SCRIPT" ] || { printf '0'; return; }
 	"$INIT_SCRIPT" enabled >/dev/null 2>&1 && printf '1' || printf '0'
 }
 
-# the effective on/off switch: /etc/init.d/usque refuses to start unless
-# usque.main.enabled=1 (see start_service in the init script)
-service_uci_enabled() {
-	bool_val "$(uci_get enabled)"
-}
+proc_pid_by_iface() {
+	local iface="$1" pat pid
 
-service_running() {
-	[ -x "$INIT_SCRIPT" ] || { printf '0'; return; }
-	"$INIT_SCRIPT" running >/dev/null 2>&1 && printf '1' || printf '0'
-}
-
-tunnel_pid() {
-	local pid
-
-	pid="$(pgrep -f 'native-tun' 2>/dev/null | head -n 1)"
-	case "$pid" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$pid" ;; esac
+	[ -n "$iface" ] || { printf ''; return; }
+	pat="native-tun.*-n ${iface}([[:space:]]|\$)"
+	pid="$(pgrep -f "$pat" 2>/dev/null | head -n 1)"
+	case "$pid" in ''|*[!0-9]*) printf ''; return ;; esac
+	# do not report an unrelated process that happens to match
+	grep -qs 'usque' "/proc/$pid/cmdline" 2>/dev/null || { printf ''; return; }
+	printf '%s' "$pid"
 }
 
 proc_uptime() {
@@ -153,9 +219,11 @@ iface_up() {
 }
 
 iface_addr() {
-	# iface_addr <iface> <4|6> - first address without prefix length
-	local addr
+	# first global address without prefix length
+	local addr fammatch
 
+	if [ "$2" = 6 ]; then fammatch=inet6; else fammatch=inet; fi
+	[ -n "$1" ] || { printf ''; return; }
 	if [ "$2" = 6 ]; then
 		addr="$(ip -o -6 addr show dev "$1" scope global 2>/dev/null | \
 			awk '{ for (i = 1; i <= NF; i++) if ($i == "inet6") { print $(i + 1); exit } }')"
@@ -166,9 +234,58 @@ iface_addr() {
 	printf '%s' "${addr%%/*}"
 }
 
-route_via_iface() {
+iface_addrs() {
+	# space separated global addresses without prefix length
+	local fam fammatch out addr
+
+	if [ "$2" = 6 ]; then fammatch=inet6; else fammatch=inet; fi
+	[ -n "$1" ] || { printf ''; return; }
+	out="$(ip -o -"$2" addr show dev "$1" scope global 2>/dev/null | \
+		awk -v m="$fammatch" '{ for (i = 1; i <= NF; i++) if ($i == m) printf "%s ", $(i + 1) }')"
+	for addr in $out; do
+		printf '%s ' "${addr%%/*}"
+	done
+}
+
+route4_via() {
 	[ -n "$1" ] || { printf '0'; return; }
-	ip route show default 2>/dev/null | grep -q "dev $1 " && printf '1' || printf '0'
+	ip route show default 2>/dev/null | grep -Eq "dev $1( |\$)" && printf '1' || printf '0'
+}
+
+route6_via() {
+	[ -n "$1" ] || { printf '0'; return; }
+	ip -6 route show default 2>/dev/null | grep -Eq "dev $1( |\$)" && printf '1' || printf '0'
+}
+
+is_usque_iface() {
+	local sid
+
+	[ -n "$1" ] || return 1
+	for sid in $(section_list); do
+		[ "$(section_iface "$sid")" = "$1" ] && return 0
+	done
+	return 1
+}
+
+wan_ipv6_default() {
+	local devs dev
+
+	devs="$(ip -6 route show default 2>/dev/null | \
+		awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); break } }')"
+	[ -n "$devs" ] || { printf '0'; return; }
+	for dev in $devs; do
+		is_usque_iface "$dev" || { printf '1'; return; }
+	done
+	printf '0'
+}
+
+lan_device() {
+	local dev
+
+	dev="$(uci -q get network.lan.device 2>/dev/null)"
+	[ -n "$dev" ] || dev="$(uci -q get network.lan.ifname 2>/dev/null)"
+	[ -n "$dev" ] || dev="br-lan"
+	printf '%s' "$dev"
 }
 
 # strip anything that could be a secret from text shown in the UI
@@ -181,6 +298,9 @@ sanitize_text() {
 
 # ---------------------------------------------------------------------------
 # WARP config file (public fields only)
+#
+# load_config must not touch the caller's jshn output buffer, so the parsing
+# happens in a subshell and the fields are passed back as plain lines.
 # ---------------------------------------------------------------------------
 
 CFG_OK=0
@@ -193,30 +313,37 @@ CFG_MODE=''
 CFG_SIZE=0
 
 load_config() {
-	local f="$1"
+	local f="$1" out
 
 	CFG_OK=0
 	CFG_ID=''; CFG_V4=''; CFG_V6=''
 	CFG_EP4=''; CFG_EP6=''
 
 	[ -n "$f" ] && [ -f "$f" ] && [ -s "$f" ] || return 1
-	# validate the JSON before eval'ing jshn output
 	jshn -R "$f" >/dev/null 2>&1 || return 1
-	json_init
-	json_load_file "$f"
-	json_get_var CFG_ID id
-	json_get_var CFG_V4 ipv4
-	json_get_var CFG_V6 ipv6
-	json_get_var CFG_EP4 endpoint_v4
-	json_get_var CFG_EP6 endpoint_v6
-	json_cleanup
+
+	out="$(
+		json_init
+		json_load_file "$f"
+		json_get_var id id
+		json_get_var v4 ipv4
+		json_get_var v6 ipv6
+		json_get_var e4 endpoint_v4
+		json_get_var e6 endpoint_v6
+		json_cleanup
+		printf '%s\n%s\n%s\n%s\n%s\n' "$id" "$v4" "$v6" "$e4" "$e6"
+	)"
 	CFG_OK=1
+	CFG_ID="$(printf '%s\n' "$out" | sed -n '1p')"
+	CFG_V4="$(printf '%s\n' "$out" | sed -n '2p')"
+	CFG_V6="$(printf '%s\n' "$out" | sed -n '3p')"
+	CFG_EP4="$(printf '%s\n' "$out" | sed -n '4p')"
+	CFG_EP6="$(printf '%s\n' "$out" | sed -n '5p')"
 	return 0
 }
 
 config_mode() {
-	# symbolic permissions like "-rw-------" (busybox stat is not available
-	# on all OpenWrt builds, ls -l is)
+	# symbolic permissions like "-rw-------"
 	ls -ld "$1" 2>/dev/null | cut -c1-10
 }
 
@@ -230,7 +357,6 @@ config_size() {
 }
 
 cfg_secure() {
-	# private key material => owner read/write only, no group/other bits
 	local p="$1" own rest
 
 	[ -n "$p" ] || { printf '0'; return; }
@@ -243,20 +369,93 @@ cfg_secure() {
 	[ "$rest" = "------" ] && printf '1' || printf '0'
 }
 
-# adds the sanitized account summary as nested "config" object
-add_config_object() {
-	json_add_object config
-	json_add_bool exists "$1"
-	json_add_bool valid "$CFG_OK"
-	json_add_str path "$2"
-	json_add_str id "$CFG_ID"
-	json_add_str ipv4 "$CFG_V4"
-	json_add_str ipv6 "$CFG_V6"
+json_add_config_fields() {
+	# uses CFG_* set by load_config; never includes private_key/access_token
+	json_add_str device_id "$CFG_ID"
+	json_add_str warp_ipv4 "$CFG_V4"
+	json_add_str warp_ipv6 "$CFG_V6"
 	json_add_str endpoint_v4 "$CFG_EP4"
 	json_add_str endpoint_v6 "$CFG_EP6"
-	json_add_str mode "$CFG_MODE"
-	json_add_int size "$CFG_SIZE"
+}
+
+# ---------------------------------------------------------------------------
+# per-connection JSON
+# ---------------------------------------------------------------------------
+
+add_connection() {
+	local sid iface cfg mode enabled pid running default_route metric
+	local ipv6 ipv6_route exists valid secure
+
+	sid="$1"
+	section_valid "$sid" || return 1
+	iface="$(section_iface "$sid")"
+	cfg="$(section_config_file "$sid")"
+	mode="$(section_mode "$sid")"
+	enabled="$(section_enabled "$sid")"
+	default_route="$(bool_val "$(uci_opt "$sid" default_route)")"
+	metric="$(uci_opt "$sid" metric)"
+	ipv6="$(uci_opt "$sid" ipv6)"
+	[ -n "$ipv6" ] || ipv6=1
+	ipv6="$(bool_val "$ipv6")"
+	ipv6_route="$(uci_opt "$sid" ipv6_route)"
+	[ -n "$ipv6_route" ] || ipv6_route=auto
+
+	exists=0; [ -f "$cfg" ] && exists=1
+	load_config "$cfg"
+	CFG_MODE="$(config_mode "$cfg")"
+	CFG_SIZE="$(config_size "$cfg")"
+	valid="$CFG_OK"
+	secure="$(cfg_secure "$CFG_MODE")"
+	[ "$exists" = 1 ] || secure=0
+
+	pid="$(proc_pid_by_iface "$iface")"
+	running=0
+	[ -n "$pid" ] && running=1
+
+	json_add_object ''
+	json_add_str section "$sid"
+	json_add_str name "$sid"
+	json_add_str iface "$iface"
+	json_add_str mode "$mode"
+	json_add_bool enabled "$enabled"
+	json_add_str config_file "$cfg"
+	json_add_bool config_exists "$exists"
+	json_add_bool config_valid "$valid"
+	json_add_bool config_secure "$secure"
+	json_add_str config_mode "$CFG_MODE"
+	json_add_uint config_size "$CFG_SIZE"
+	json_add_str mtu "$(uci_opt "$sid" mtu)"
+	json_add_str endpoint_port "$(uci_opt "$sid" endpoint_port)"
+	json_add_bool always_reconnect "$(bool_val "$(uci_opt "$sid" always_reconnect)")"
+	json_add_bool auto_register "$(bool_val "$(uci_opt "$sid" auto_register)")"
+	json_add_str device_name "$(uci_opt "$sid" device_name)"
+	json_add_str log_level "$(uci_opt "$sid" log_level)"
+	json_add_str sni "$(uci_opt "$sid" sni)"
+	json_add_bool default_route "$default_route"
+	json_add_uint metric "$metric"
+	json_add_bool ipv6 "$ipv6"
+	json_add_str ipv6_route "$ipv6_route"
+	json_add_bool running "$running"
+	if [ -n "$pid" ]; then
+		json_add_uint pid "$pid"
+		json_add_uint uptime "$(proc_uptime "$pid")"
+	else
+		json_add_uint pid 0
+		json_add_uint uptime 0
+	fi
+	json_add_bool iface_exists "$(iface_exists "$iface")"
+	json_add_bool iface_up "$(iface_up "$iface")"
+	json_add_str iface_ipv4 "$(iface_addr "$iface" 4)"
+	json_add_str iface_ipv6 "$(iface_addr "$iface" 6)"
+	json_add_bool route4_installed "$(route4_via "$iface")"
+	json_add_bool route6_installed "$(route6_via "$iface")"
+	json_add_config_fields
 	json_close_object
+	return 0
+}
+
+connection_running() {
+	[ -n "$(proc_pid_by_iface "$(section_iface "$1")")" ] && printf '1' || printf '0'
 }
 
 # ---------------------------------------------------------------------------
@@ -264,60 +463,68 @@ add_config_object() {
 # ---------------------------------------------------------------------------
 
 do_status() {
-	local cfg iface enabled boot_enabled running pid uptime mtu exists valid secure
+	local sid running_any enabled_any lan_dev ula ra lan_addrs active scount
 
-	cfg="$(config_path)"
-	iface="$(iface_name)"
-	enabled="$(service_uci_enabled)"
-	boot_enabled="$(service_boot_enabled)"
-	running="$(service_running)"
-	pid="$(tunnel_pid)"
-	uptime="$(proc_uptime "$pid")"
-	mtu="$(uci_get mtu)"
+	running_any=0
+	enabled_any=0
+	scount=0
+	for sid in $(section_list); do
+		section_valid "$sid" || continue
+		scount=$((scount + 1))
+		[ "$(section_enabled "$sid")" = 1 ] && enabled_any=1
+		[ "$(connection_running "$sid")" = 1 ] && running_any=1
+	done
 
-	load_config "$cfg"
-	exists=0; [ -f "$cfg" ] && exists=1
-	valid="$CFG_OK"
-	CFG_MODE="$(config_mode "$cfg")"
-	CFG_SIZE="$(config_size "$cfg")"
-	secure="$(cfg_secure "$CFG_MODE")"
-	[ "$exists" = 1 ] || secure=0
+	lan_dev="$(lan_device)"
+	ula="$(uci -q get network.globals.ula_prefix 2>/dev/null)"
+	ra="$(uci -q get dhcp.lan.ra 2>/dev/null)"
+	lan_addrs="$(iface_addrs "$lan_dev" 6)"
+
+	if [ -n "$ula" ] && [ "$ra" = "server" ] && [ -n "$lan_addrs" ]; then
+		active=1
+	else
+		active=0
+	fi
 
 	json_init
 	json_add_boolean ok 1
-	json_add_bool installed "$([ -x "$USQUE_BIN" ] && printf 1 || printf 0)"
+	json_add_object service
 	json_add_bool init_script "$([ -x "$INIT_SCRIPT" ] && printf 1 || printf 0)"
-	json_add_bool enabled "$enabled"
-	json_add_bool init_enabled "$boot_enabled"
-	json_add_bool running "$running"
-	json_add_int pid "${pid:-0}"
-	json_add_int uptime "${uptime:-0}"
-	json_add_str iface "$iface"
-	json_add_bool iface_exists "$(iface_exists "$iface")"
-	json_add_bool iface_up "$(iface_up "$iface")"
-	json_add_str iface_ipv4 "$(iface_addr "$iface" 4)"
-	json_add_str iface_ipv6 "$(iface_addr "$iface" 6)"
-	json_add_bool default_route_via_iface "$(route_via_iface "$iface")"
-	json_add_str config_path "$cfg"
-	json_add_bool config_exists "$exists"
-	json_add_bool config_valid "$valid"
-	json_add_bool config_secure "$secure"
-	json_add_str config_mode "$CFG_MODE"
-	json_add_int config_size "$CFG_SIZE"
-	json_add_str device_id "$CFG_ID"
-	json_add_str warp_ipv4 "$CFG_V4"
-	json_add_str warp_ipv6 "$CFG_V6"
-	json_add_str endpoint_v4 "$CFG_EP4"
-	json_add_str endpoint_v6 "$CFG_EP6"
-	json_add_str mtu "${mtu:-}"
+	json_add_bool boot_enabled "$(service_boot_enabled)"
+	json_add_bool enabled_any "$enabled_any"
+	json_add_bool running_any "$running_any"
+	json_add_uint connection_count "$scount"
+	json_close_object
+
+	json_add_object globals
+	json_add_bool lan_ipv6 "$(bool_val "$(uci_glob lan_ipv6)")"
+	json_add_str lan_ipv6_prefix "$(uci_glob lan_ipv6_prefix)"
+	json_add_str lan_device "$lan_dev"
+	json_add_str lan_ula "$ula"
+	json_add_str lan_ra "$ra"
+	json_add_str lan_ipv6_addrs "$lan_addrs"
+	json_add_bool wan_ipv6_default "$(wan_ipv6_default)"
+	json_add_bool lan_ipv6_active "$active"
+	json_close_object
+
+	json_add_array connections
+	for sid in $(section_list); do
+		add_connection "$sid"
+	done
+	json_close_array
+
 	json_dump
 	json_cleanup
 }
 
 do_get_config() {
-	local cfg exists secure
+	local sid cfg exists valid secure
 
-	cfg="$(config_path)"
+	json_get_var sid section
+	section_valid "$sid" || reply_error "Invalid or missing section"
+	section_known "$sid" || reply_error "Unknown section '$sid'"
+
+	cfg="$(section_config_file "$sid")"
 	exists=0; [ -f "$cfg" ] && exists=1
 	load_config "$cfg"
 	CFG_MODE="$(config_mode "$cfg")"
@@ -327,39 +534,49 @@ do_get_config() {
 
 	json_init
 	json_add_boolean ok 1
-	json_add_bool exists "$exists"
-	json_add_bool secure "$secure"
+	json_add_str section "$sid"
 	json_add_str path "$cfg"
+	json_add_bool exists "$exists"
+	json_add_bool valid "$CFG_OK"
+	json_add_bool secure "$secure"
 	json_add_str mode "$CFG_MODE"
-	json_add_int size "$CFG_SIZE"
-	json_add_str id "$CFG_ID"
-	json_add_str ipv4 "$CFG_V4"
-	json_add_str ipv6 "$CFG_V6"
-	json_add_str endpoint_v4 "$CFG_EP4"
-	json_add_str endpoint_v6 "$CFG_EP6"
+	json_add_uint size "$CFG_SIZE"
+	json_add_config_fields
 	json_dump
 	json_cleanup
 }
 
-register_running() {
-	local pid
+# --- registration ---------------------------------------------------------
 
-	[ -f "$REG_PIDFILE" ] || return 1
-	pid="$(cat "$REG_PIDFILE" 2>/dev/null)"
+reg_dir() {
+	printf '%s/reg/%s' "$RUN_DIR" "$1"
+}
+
+register_running() {
+	local pid dir
+
+	dir="$(reg_dir "$1")"
+	[ -f "$dir/pid" ] || return 1
+	pid="$(cat "$dir/pid" 2>/dev/null)"
 	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
 	[ -d "/proc/$pid" ] || return 1
-	# protect against pid reuse
 	grep -qs 'usque' "/proc/$pid/cmdline" 2>/dev/null || return 1
 	return 0
 }
 
 do_register() {
-	local name tos cfg dir clean
+	local sid name tos cfg dir clean rdir
 
+	json_get_var sid section
 	json_get_var name name
 	json_get_var tos accept_tos
 	name="${name# }"
 	name="${name% }"
+
+	section_valid "$sid" || reply_error "Invalid or missing section"
+	section_known "$sid" || reply_error "Unknown section '$sid'"
+	[ "$(section_mode "$sid")" = "cloudflare" ] || \
+		reply_error "Section '$sid' is in custom mode; use the JSON import instead of Cloudflare registration"
 
 	[ "$(bool_val "$tos")" = 1 ] || \
 		reply_error "You must accept the Cloudflare WARP Terms of Service"
@@ -367,8 +584,8 @@ do_register() {
 	[ -x "$USQUE_BIN" ] || \
 		reply_error "usque binary not found at $USQUE_BIN (is the usque package installed?)"
 
-	register_running && \
-		reply_error "A registration is already running, please wait for it to finish"
+	register_running "$sid" && \
+		reply_error "A registration is already running for section '$sid'"
 
 	if [ -n "$name" ]; then
 		clean="$(printf '%s' "$name" | tr -cd 'A-Za-z0-9._ -')"
@@ -378,18 +595,18 @@ do_register() {
 			reply_error "Device name is too long (max 64 characters)"
 	fi
 
-	cfg="$(config_path)"
+	cfg="$(section_config_file "$sid")"
 	dir="$(dirname "$cfg")"
 	mkdir -p "$dir" 2>/dev/null
 	[ -d "$dir" ] || reply_error "Cannot create configuration directory $dir"
 
-	mkdir -p "$RUN_DIR" 2>/dev/null
-	chmod 700 "$RUN_DIR" 2>/dev/null
-	[ -d "$RUN_DIR" ] || reply_error "Cannot create $RUN_DIR"
-
-	rm -f "$REG_LOG" "$REG_DONE" "$REG_PIDFILE" "$REG_TIMEOUT_MARK" 2>/dev/null
-	: > "$REG_LOG" 2>/dev/null || reply_error "Cannot write $REG_LOG"
-	date +%s > "$REG_STARTED" 2>/dev/null
+	rdir="$(reg_dir "$sid")"
+	mkdir -p "$rdir" 2>/dev/null
+	chmod 700 "$RUN_DIR" "$rdir" 2>/dev/null
+	[ -d "$rdir" ] || reply_error "Cannot create $rdir"
+	rm -f "$rdir/log" "$rdir/done" "$rdir/pid" "$rdir/timeout" 2>/dev/null
+	: > "$rdir/log" 2>/dev/null || reply_error "Cannot write $rdir/log"
+	date +%s > "$rdir/started" 2>/dev/null
 
 	if [ -n "$name" ]; then
 		set -- "$USQUE_BIN" --config "$cfg" register --accept-tos --force -n "$name"
@@ -417,14 +634,15 @@ if [ "$rc" = 0 ] && [ -s "$cf" ]; then
 	d=$(dirname "$cf"); [ -n "$d" ] && chmod 700 "$d" 2>/dev/null
 fi
 printf "%s\n" "$rc" >"$donef"
-' register "$REG_LOG" "$REG_DONE" "$REG_PIDFILE" "$REG_TIMEOUT_MARK" \
+' register "$rdir/log" "$rdir/done" "$rdir/pid" "$rdir/timeout" \
 		"$REG_TIMEOUT" "$cfg" "$@" </dev/null >/dev/null 2>&1 &
 
-	logger -t luci-usque "started WARP registration (config=$cfg name=${name:-default})" 2>/dev/null
+	logger -t luci-usque "started WARP registration for $sid (config=$cfg name=${name:-default})" 2>/dev/null
 
 	json_init
 	json_add_boolean ok 1
 	json_add_bool started 1
+	json_add_str section "$sid"
 	json_add_str path "$cfg"
 	json_add_str name "$name"
 	json_dump
@@ -432,24 +650,28 @@ printf "%s\n" "$rc" >"$donef"
 }
 
 do_register_status() {
-	local running done rc elapsed started now out tout cfg exists
+	local sid rdir running done rc elapsed started now out tout cfg exists
 
+	json_get_var sid section
+	section_valid "$sid" || reply_error "Invalid or missing section"
+
+	rdir="$(reg_dir "$sid")"
 	running=0
 	done=0
 	tout=0
 	rc=''
 	elapsed=0
-	cfg="$(config_path)"
+	cfg="$(section_config_file "$sid")"
 
-	if [ -f "$REG_DONE" ]; then
+	if [ -f "$rdir/done" ]; then
 		done=1
-		rc="$(cat "$REG_DONE" 2>/dev/null)"
+		rc="$(cat "$rdir/done" 2>/dev/null)"
 		case "$rc" in ''|*[!0-9]*) rc='' ;; esac
-	elif register_running; then
+	elif register_running "$sid"; then
 		running=1
 	fi
-	if [ -f "$REG_STARTED" ]; then
-		started="$(cat "$REG_STARTED" 2>/dev/null)"
+	if [ -f "$rdir/started" ]; then
+		started="$(cat "$rdir/started" 2>/dev/null)"
 		now="$(date +%s 2>/dev/null)"
 		case "$started" in
 			''|*[!0-9]*) ;;
@@ -464,17 +686,18 @@ do_register_status() {
 			;;
 		esac
 	fi
-	[ -f "$REG_TIMEOUT_MARK" ] && tout=1
+	[ -f "$rdir/timeout" ] && tout=1
 
 	exists=0; [ -f "$cfg" ] && exists=1
 	load_config "$cfg"
 	CFG_MODE="$(config_mode "$cfg")"
 	CFG_SIZE="$(config_size "$cfg")"
 
-	out="$(tail -n 25 "$REG_LOG" 2>/dev/null | sanitize_text 2>/dev/null | tail -c 1500)"
+	out="$(tail -n 25 "$rdir/log" 2>/dev/null | sanitize_text 2>/dev/null | tail -c 1500)"
 
 	json_init
 	json_add_boolean ok 1
+	json_add_str section "$sid"
 	json_add_bool running "$running"
 	json_add_bool done "$done"
 	json_add_bool timed_out "$tout"
@@ -483,19 +706,112 @@ do_register_status() {
 	else
 		json_add_null rc
 	fi
-	json_add_int elapsed "$elapsed"
+	json_add_uint elapsed "$elapsed"
 	json_add_str output "$out"
 	json_add_str path "$cfg"
 	json_add_bool config_exists "$exists"
-	add_config_object "$exists" "$cfg"
+	json_add_str config_mode "$CFG_MODE"
+	json_add_uint config_size "$CFG_SIZE"
+	json_add_config_fields
 	json_dump
 	json_cleanup
 }
 
+# --- custom endpoint import ----------------------------------------------
+
+do_import_config() {
+	local sid cfg json dir tmp pk v4 ep4 epk
+
+	json_get_var sid section
+	json_get_var json json
+	section_valid "$sid" || reply_error "Invalid or missing section"
+	section_known "$sid" || reply_error "Unknown section '$sid'"
+	[ "$(section_mode "$sid")" = "custom" ] || \
+		reply_error "Section '$sid' is in cloudflare mode; switch it to custom mode first"
+
+	[ -n "$json" ] || reply_error "Missing JSON payload"
+	case "$json" in
+		'{'*) ;;
+		*) reply_error "The configuration must be a JSON object" ;;
+	esac
+
+	cfg="$(section_config_file "$sid")"
+	dir="$(dirname "$cfg")"
+	mkdir -p "$dir" 2>/dev/null
+	[ -d "$dir" ] || reply_error "Cannot create configuration directory $dir"
+
+	tmp="$dir/.$(basename "$cfg").tmp.$$"
+	IMPORT_TMP="$tmp"
+	trap 'rm -f "$IMPORT_TMP"' EXIT
+	printf '%s\n' "$json" > "$tmp" 2>/dev/null || reply_error "Cannot write $tmp"
+
+	jshn -R "$tmp" >/dev/null 2>&1 || reply_error "The payload is not valid JSON"
+
+	pk=''; v4=''; ep4=''; epk=''
+	{
+		json_init
+		json_load_file "$tmp"
+		json_get_var pk private_key
+		json_get_var v4 ipv4
+		json_get_var ep4 endpoint_v4
+		json_get_var epk endpoint_pub_key
+		json_cleanup
+		printf '%s\n%s\n%s\n%s\n' "$pk" "$v4" "$ep4" "$epk"
+	} > "$dir/.$(basename "$cfg").fields.$$"
+
+	pk="$(sed -n '1p' "$dir/.$(basename "$cfg").fields.$$")"
+	v4="$(sed -n '2p' "$dir/.$(basename "$cfg").fields.$$")"
+	ep4="$(sed -n '3p' "$dir/.$(basename "$cfg").fields.$$")"
+	epk="$(sed -n '4p' "$dir/.$(basename "$cfg").fields.$$")"
+	rm -f "$dir/.$(basename "$cfg").fields.$$"
+
+	[ -n "$pk" ] || reply_error "Missing required field: private_key"
+	[ -n "$v4" ] || reply_error "Missing required field: ipv4"
+	[ -n "$ep4" ] || reply_error "Missing required field: endpoint_v4"
+	[ -n "$epk" ] || reply_error "Missing required field: endpoint_pub_key"
+	case "$epk" in
+		*"BEGIN PUBLIC KEY"*) ;;
+		*) reply_error "endpoint_pub_key must be a PEM encoded public key" ;;
+	esac
+	case "$v4" in
+		''|*[!0-9.]*) reply_error "ipv4 is not a plain IPv4 address" ;;
+	esac
+	[ "${#pk}" -ge 32 ] || reply_error "private_key looks too short"
+
+	chmod 600 "$tmp" 2>/dev/null
+	mv -f "$tmp" "$cfg" 2>/dev/null || reply_error "Cannot move the configuration into place"
+	chmod 600 "$cfg" 2>/dev/null
+	chmod 700 "$dir" 2>/dev/null
+	IMPORT_TMP=""
+	trap - EXIT
+
+	logger -t luci-usque "imported custom configuration for $sid (config=$cfg)" 2>/dev/null
+
+	load_config "$cfg"
+	CFG_MODE="$(config_mode "$cfg")"
+	CFG_SIZE="$(config_size "$cfg")"
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool imported 1
+	json_add_str section "$sid"
+	json_add_str path "$cfg"
+	json_add_bool valid "$CFG_OK"
+	json_add_bool secure "$(cfg_secure "$CFG_MODE")"
+	json_add_str mode "$CFG_MODE"
+	json_add_uint size "$CFG_SIZE"
+	json_add_config_fields
+	json_dump
+	json_cleanup
+}
+
+# --- actions --------------------------------------------------------------
+
 do_set_init_action() {
-	local action out rc rcstr
+	local action sid out rc rcstr
 
 	json_get_var action action
+	json_get_var sid section
 
 	case "$action" in
 		start|stop|restart|enable|disable) ;;
@@ -505,20 +821,41 @@ do_set_init_action() {
 	[ -x "$INIT_SCRIPT" ] || \
 		reply_error "Service script $INIT_SCRIPT not found (is the usque package installed?)"
 
-	out="$("$INIT_SCRIPT" "$action" 2>&1)"
-	rc=$?
+	if [ -n "$sid" ]; then
+		section_valid "$sid" || reply_error "Invalid section '$sid'"
+		section_known "$sid" || reply_error "Unknown section '$sid'"
+	fi
+
+	# enable/disable are global (rc.d symlink); start/stop/restart may be scoped
+	# to one connection by passing the section to the init script.
+	case "$action" in
+		enable|disable)
+			out="$("$INIT_SCRIPT" "$action" 2>&1)"
+			rc=$?
+			;;
+		*)
+			if [ -n "$sid" ]; then
+				out="$("$INIT_SCRIPT" "$action" "$sid" 2>&1)"
+				rc=$?
+			else
+				out="$("$INIT_SCRIPT" "$action" 2>&1)"
+				rc=$?
+			fi
+			;;
+	esac
 	out="$(printf '%s\n' "$out" | tail -n 15)"
 	if [ "$rc" -eq 0 ]; then rcstr=1; else rcstr=0; fi
 
-	logger -t luci-usque "init action '$action' rc=$rc" 2>/dev/null
+	logger -t luci-usque "init action '$action'${sid:+ for $sid} rc=$rc" 2>/dev/null
 
 	json_init
 	json_add_bool ok "$rcstr"
 	json_add_str action "$action"
+	json_add_str section "$sid"
 	json_add_int rc "$rc"
 	json_add_str output "$out"
 	if [ "$rc" -ne 0 ]; then
-		json_add_str error "init.d action '$action' failed (rc=$rc)"
+		json_add_str error "init.d action '$action'${sid:+ for $sid} failed (rc=$rc)"
 	fi
 	json_dump
 	json_cleanup
@@ -578,14 +915,18 @@ fetch_trace() {
 }
 
 do_test() {
-	local cfg iface bound warp ip colo loc gw ts raw
+	local sid iface bound warp ip colo loc gw ts raw
 
-	cfg="$(config_path)"
-	iface="$(iface_name)"
-	load_config "$cfg"
+	json_get_var sid section
+	iface=""
+	if [ -n "$sid" ]; then
+		section_valid "$sid" || reply_error "Invalid section '$sid'"
+		section_known "$sid" || reply_error "Unknown section '$sid'"
+		iface="$(section_iface "$sid")"
+	fi
 
 	bound=0
-	if [ "$(iface_exists "$iface")" = 1 ]; then
+	if [ -n "$iface" ] && [ "$(iface_exists "$iface")" = 1 ]; then
 		fetch_trace "$iface"
 	else
 		fetch_trace ""
@@ -597,6 +938,7 @@ do_test() {
 	if [ -z "$TRACE_BODY" ]; then
 		json_init
 		json_add_boolean ok 0
+		json_add_str section "$sid"
 		json_add_str warp unknown
 		json_add_bool bound 0
 		json_add_str error "No egress test could be performed (no curl/uclient-fetch/wget, or no connectivity)"
@@ -617,8 +959,10 @@ do_test() {
 		on|off) ;;
 		*) warp=unknown ;;
 	esac
+
 	json_init
 	json_add_boolean ok 1
+	json_add_str section "$sid"
 	json_add_str warp "$warp"
 	json_add_str ip "$ip"
 	json_add_str colo "$colo"
@@ -634,36 +978,47 @@ do_test() {
 }
 
 do_logs() {
-	local out count
+	local sid iface out count
 
-	out="$(logread -e usque 2>/dev/null | tail -n 80)"
+	json_get_var sid section
+
+	if [ -n "$sid" ]; then
+		section_valid "$sid" || reply_error "Invalid section '$sid'"
+		iface="$(section_iface "$sid")"
+		out="$(logread -e usque 2>/dev/null | \
+			grep -E "(^|[^[:alnum:]_-])($sid|$iface)([^[:alnum:]_-]|$)" | tail -n 80)"
+	else
+		out="$(logread -e usque 2>/dev/null | tail -n 80)"
+	fi
 	count="$(printf '%s\n' "$out" | grep -c . 2>/dev/null)"
 
 	json_init
 	json_add_boolean ok 1
+	json_add_str section "$sid"
 	json_add_str lines "$out"
-	json_add_int count "${count:-0}"
+	json_add_uint count "${count:-0}"
 	json_dump
 	json_cleanup
 }
 
 do_fix_config_perms() {
-	local cfg mode sec
+	local sid cfg mode sec
 
-	cfg="$(config_path)"
+	json_get_var sid section
+	section_valid "$sid" || reply_error "Invalid or missing section"
+	cfg="$(section_config_file "$sid")"
 	[ -f "$cfg" ] || reply_error "Configuration file $cfg does not exist"
 
 	chmod 600 "$cfg" 2>/dev/null
 	mode="$(config_mode "$cfg")"
 	sec="$(cfg_secure "$mode")"
-	if [ "$sec" != 1 ]; then
-		reply_error "Could not restrict permissions of $cfg (current mode: ${mode:-unknown})"
-	fi
+	[ "$sec" = 1 ] || reply_error "Could not restrict permissions of $cfg (current mode: ${mode:-unknown})"
 
 	logger -t luci-usque "restricted permissions of $cfg to 600" 2>/dev/null
 
 	json_init
 	json_add_boolean ok 1
+	json_add_str section "$sid"
 	json_add_str path "$cfg"
 	json_add_str mode "$mode"
 	json_dump
@@ -671,30 +1026,36 @@ do_fix_config_perms() {
 }
 
 do_delete_config() {
-	local cfg was_running
+	local sid cfg was_running
 
-	cfg="$(config_path)"
+	json_get_var sid section
+	section_valid "$sid" || reply_error "Invalid or missing section"
+	section_known "$sid" || reply_error "Unknown section '$sid'"
+
+	cfg="$(section_config_file "$sid")"
 
 	case "$cfg" in
-		/etc/usque/*) ;;
-		*) reply_error "Refusing to delete '$cfg': path is outside /etc/usque" ;;
+		"$DEFAULT_CONFIG_DIR"/*) ;;
+		*) reply_error "Refusing to delete '$cfg': path is outside $DEFAULT_CONFIG_DIR" ;;
 	esac
-	[ "$cfg" = "/etc/usque/" ] && reply_error "Invalid configuration path"
 
-	was_running="$(service_running)"
-	if [ "$was_running" = 1 ]; then
-		"$INIT_SCRIPT" stop >/dev/null 2>&1
+	was_running=0
+	if [ "$(connection_running "$sid")" = 1 ]; then
+		was_running=1
+		# stop only this connection if the init script supports it
+		"$INIT_SCRIPT" stop "$sid" >/dev/null 2>&1 || true
 	fi
 
 	rm -f "$cfg" 2>/dev/null
 	[ -f "$cfg" ] && reply_error "Failed to remove $cfg"
 
-	rm -f "$REG_DONE" "$REG_LOG" "$REG_PIDFILE" "$REG_STARTED" "$REG_TIMEOUT_MARK" 2>/dev/null
-	logger -t luci-usque "removed WARP configuration $cfg" 2>/dev/null
+	rm -rf "$(reg_dir "$sid")" 2>/dev/null
+	logger -t luci-usque "removed configuration $cfg (section $sid)" 2>/dev/null
 
 	json_init
 	json_add_boolean ok 1
 	json_add_bool deleted 1
+	json_add_str section "$sid"
 	json_add_str path "$cfg"
 	json_add_bool was_running "$was_running"
 	json_dump
@@ -710,23 +1071,35 @@ list_methods() {
 	json_add_object status
 	json_close_object
 	json_add_object getConfig
+		json_add_string section "String"
 	json_close_object
 	json_add_object register
+		json_add_string section "String"
 		json_add_string name "String"
 		json_add_string accept_tos "String"
 	json_close_object
 	json_add_object registerStatus
+		json_add_string section "String"
+	json_close_object
+	json_add_object importConfig
+		json_add_string section "String"
+		json_add_string json "String"
+	json_close_object
+	json_add_object deleteConfig
+		json_add_string section "String"
 	json_close_object
 	json_add_object setInitAction
 		json_add_string action "String"
+		json_add_string section "String"
 	json_close_object
 	json_add_object test
+		json_add_string section "String"
 	json_close_object
 	json_add_object logs
-	json_close_object
-	json_add_object deleteConfig
+		json_add_string section "String"
 	json_close_object
 	json_add_object fixConfigPermissions
+		json_add_string section "String"
 	json_close_object
 	json_dump
 	json_cleanup
@@ -742,16 +1115,17 @@ read_input() {
 
 handle_call() {
 	case "$1" in
-		status)         do_status ;;
-		getConfig)      do_get_config ;;
-		register)       read_input; do_register ;;
-		registerStatus) do_register_status ;;
-		setInitAction)  read_input; do_set_init_action ;;
-		test)           do_test ;;
-		logs)           do_logs ;;
-		deleteConfig)   do_delete_config ;;
-		fixConfigPermissions) do_fix_config_perms ;;
-		*)              reply_error "Unknown method '$1'" ;;
+		status)               do_status ;;
+		getConfig)            read_input; do_get_config ;;
+		register)             read_input; do_register ;;
+		registerStatus)       read_input; do_register_status ;;
+		importConfig)         read_input; do_import_config ;;
+		deleteConfig)         read_input; do_delete_config ;;
+		setInitAction)        read_input; do_set_init_action ;;
+		test)                 read_input; do_test ;;
+		logs)                 read_input; do_logs ;;
+		fixConfigPermissions) read_input; do_fix_config_perms ;;
+		*)                    reply_error "Unknown method '$1'" ;;
 	esac
 }
 
