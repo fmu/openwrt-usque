@@ -37,7 +37,10 @@ jobs:
           set -euo pipefail
           rm -rf site
           mkdir -p site/feed
-          cp -r docs/. site/
+          if [ -d docs ]; then cp -r docs/. site/; fi
+          if [ ! -f site/index.html ]; then
+            printf '<!doctype html><title>usque for OpenWrt</title><p>Site build in progress.</p>\n' > site/index.html
+          fi
           cp keys/usque.pem site/feed/usque.pem
           # GitHub Pages runs Jekyll by default; disable it so filenames are
           # served verbatim (the deploy-pages artifact bypasses Jekyll anyway).
