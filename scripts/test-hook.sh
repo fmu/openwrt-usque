@@ -164,7 +164,16 @@ run_hook disconnect warp0 warp0 "" 1 always 0 0
 [ "$(rule6)" -eq 0 ] && pass "IPv6 rule removed" || fail "IPv6 rule left behind"
 
 echo
-echo "== test 7: disconnect is idempotent and never breaks IPv4"
+echo "== test 7: stale/missing state marker never leaves the policy rule behind"
+run_hook connect warp0 warp0 "162.159.198.2:443" 0 off 1 0
+[ "$(rule4)" -eq 1 ] && pass "IPv4 rule installed" || fail "IPv4 rule missing"
+rm -f "$STATE/shared/iprule-v4.added"
+run_hook disconnect warp0 warp0 "" 0 off 1 0
+[ "$(rule4)" -eq 0 ] && pass "IPv4 rule removed even with the state marker gone" || fail "IPv4 rule left behind without marker"
+[ "$(default_dev)" = "wan0" ] && pass "WAN IPv4 default restored" || fail "WAN default not restored"
+
+echo
+echo "== test 8: disconnect is idempotent and never breaks IPv4"
 run_hook disconnect warp0 warp0 "" 0 off 0 0
 run_hook disconnect warp0 warp0 "" 1 always 0 0
 [ "$(default_dev)" = "wan0" ] && pass "IPv4 default still via wan0" || fail "IPv4 default broken ($(default_dev))"

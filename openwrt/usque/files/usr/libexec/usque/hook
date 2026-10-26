@@ -261,11 +261,16 @@ policy_del() {
 	owner_del "$file"
 	if [ "$(owner_count "$file")" -eq 0 ]; then
 		added="$(cat "$SHARED/$file.added" 2>/dev/null)"
-		if [ "$added" = 1 ]; then
+		if [ "$added" = 0 ]; then
+			# The rule existed before usque started: leave it alone.
+			log "IPv$fam policy rule was present before usque, leaving it in place"
+		elif ip_cmd "$fam" rule show 2>/dev/null | grep -q "^$POLICY_PRIO:.*lookup main"; then
+			# Marker missing/stale or 1: let the kernel state decide, so a
+			# lost state directory can never leave the rule behind.
 			if ip_cmd "$fam" rule del priority "$POLICY_PRIO" 2>/dev/null; then
 				log "removed IPv$fam policy rule priority $POLICY_PRIO"
 			else
-				log "IPv$fam policy rule priority $POLICY_PRIO already gone"
+				log "failed to remove IPv$fam policy rule priority $POLICY_PRIO"
 			fi
 		fi
 		rm -f "$SHARED/$file.added"

@@ -214,11 +214,33 @@ start_service() {
 	fi
 }
 
+# Safety net: if no section owns a tunnel default route any more but the
+# priority-1000 policy rule is still installed (e.g. the shared state was lost
+# after a crash), remove it.  A rule that existed before usque started is left
+# alone (marker file says 0).
+cleanup_orphan_policy_rules() {
+	local fam marker
+	for fam in 4 6; do
+		marker="$STATE_ROOT/shared/iprule-v$fam.added"
+		[ -s "$STATE_ROOT/shared/iprule-v$fam" ] && continue
+		[ "$(cat "$marker" 2>/dev/null)" = 0 ] && continue
+		if [ "$fam" = 6 ]; then
+			ip -6 rule show 2>/dev/null | grep -q '^1000:.*lookup main' || continue
+			ip -6 rule del priority 1000 >/dev/null 2>&1 && log "removed orphan IPv6 policy rule"
+		else
+			ip rule show 2>/dev/null | grep -q '^1000:.*lookup main' || continue
+			ip rule del priority 1000 >/dev/null 2>&1 && log "removed orphan IPv4 policy rule"
+		fi
+		rm -f "$marker"
+	done
+}
+
 stop_service() {
 	local only="$1"
 	load_settings
 	config_load usque
 	config_foreach stop_instance usque "$only"
+	[ -z "$only" ] && cleanup_orphan_policy_rules
 }
 
 reload_service() {
