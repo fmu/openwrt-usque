@@ -42,6 +42,17 @@ impl TunnelDevice for NativeTun {
     }
 }
 
+/// Whether an OS error just means "the requested state is already in place".
+///
+/// Restarting the daemon while a (persisted) TUN device is still present makes
+/// the kernel answer `RTM_NEWADDR`/`RTM_NEWLINK` with `EEXIST` for the address
+/// and link settings that are already configured. That is the desired end
+/// state, not a failure: configure the link idempotently and keep going.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn is_already_configured(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::AlreadyExists
+}
+
 #[cfg(target_os = "linux")]
 async fn platform_create(cfg: NativeTunConfig) -> Result<NativeTun> {
     linux::create(cfg).await
@@ -55,4 +66,33 @@ async fn platform_create(cfg: NativeTunConfig) -> Result<NativeTun> {
 #[cfg(not(any(target_os = "linux", windows)))]
 async fn platform_create(cfg: NativeTunConfig) -> Result<NativeTun> {
     unsupported::create(cfg).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_already_configured;
+
+    #[test]
+    fn eexist_counts_as_already_configured() {
+        // Linux EEXIST == 17; `io::ErrorKind::AlreadyExists` is what both the
+        // raw-os-error and the kind-constructed variants report.
+        assert!(is_already_configured(&std::io::Error::from_raw_os_error(17)));
+        assert!(is_already_configured(&std::io::Error::from(
+            std::io::ErrorKind::AlreadyExists
+        )));
+    }
+
+    #[test]
+    fn other_errors_are_still_fatal() {
+        // EPERM (1), ENOENT (2), EINVAL (22): must not be swallowed.
+        for code in [1, 2, 22, 100] {
+            assert!(
+                !is_already_configured(&std::io::Error::from_raw_os_error(code)),
+                "errno {code} must not be treated as already configured"
+            );
+        }
+        assert!(!is_already_configured(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
 }

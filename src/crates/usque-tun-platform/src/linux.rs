@@ -103,37 +103,65 @@ async fn configure_link(
         .context("link not found")?;
     let index = link.header.index;
 
-    handle
-        .link()
-        .change(
-            LinkUnspec::new_with_index(index)
-                .mtu(mtu as u32)
-                .up()
-                .build(),
-        )
-        .execute()
-        .await
-        .context("failed to set link up/mtu")?;
+    tolerate_already_configured(
+        handle
+            .link()
+            .change(
+                LinkUnspec::new_with_index(index)
+                    .mtu(mtu as u32)
+                    .up()
+                    .build(),
+            )
+            .execute()
+            .await,
+        "set link up/mtu",
+    )?;
 
     if let Some(v4) = ipv4 {
         let ip: std::net::Ipv4Addr = v4.parse()?;
-        handle
-            .address()
-            .add(index, ip.into(), 32)
-            .execute()
-            .await
-            .context("failed to add IPv4 address")?;
+        tolerate_already_configured(
+            handle.address().add(index, ip.into(), 32).execute().await,
+            "add IPv4 address",
+        )?;
     }
 
     if let Some(v6) = ipv6 {
         let ip: std::net::Ipv6Addr = v6.parse()?;
-        handle
-            .address()
-            .add(index, ip.into(), 128)
-            .execute()
-            .await
-            .context("failed to add IPv6 address")?;
+        tolerate_already_configured(
+            handle
+                .address()
+                .add(index, ip.into(), 128)
+                .execute()
+                .await,
+            "add IPv6 address",
+        )?;
     }
 
     Ok(())
+}
+
+/// Whether a netlink request failed only because the requested state already
+/// exists (EEXIST from `RTM_NEWADDR`/`RTM_NEWLINK`).
+fn is_netlink_already_configured(err: &rtnetlink::Error) -> bool {
+    match err {
+        rtnetlink::Error::NetlinkError(msg) => crate::is_already_configured(&msg.to_io()),
+        _ => false,
+    }
+}
+
+/// Run a link-configuration netlink request, treating "already configured" as
+/// success so that attaching to a TUN device left behind by a previous process
+/// (persisted device, stop/start race) does not abort start-up.
+fn tolerate_already_configured(result: Result<(), rtnetlink::Error>, what: &str) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if is_netlink_already_configured(&err) {
+                tracing::info!("{what}: already configured, continuing ({err})");
+                Ok(())
+            } else {
+                Err(anyhow::Error::from(err)).with_context(|| format!("failed to {what}"))
+            }
+        }
+    }
 }

@@ -182,6 +182,8 @@ gone (see §4).
 | --- | --- |
 | `crates/usque-tun-platform/src/lib.rs` | `mod linux` is `#[cfg(target_os = "linux")]` (it was unconditional, so the crate did not compile on macOS even though an `unsupported` fallback exists) |
 | `vendor/prepare_h3.sh` | honour `$CARGO_HOME` instead of hard-coding `$HOME/.cargo`, so the workspace-local toolchain cache works |
+| `crates/usque-tun-platform/src/linux.rs` | link configuration is now idempotent: `EEXIST` from `RTM_NEWLINK`/`RTM_NEWADDR` (e.g. restarting while the persisted TUN device and its addresses are still present) is treated as "already configured" instead of a fatal error, which previously made every other procd restart exit and respawn 10 s later. The errno classification lives in `is_already_configured()` (`usque-tun-platform/src/lib.rs`) so it is unit-tested on any host |
+| `crates/usque-tun-platform/src/lib.rs` | `is_already_configured(&io::Error)` helper + unit tests (EEXIST accepted, EPERM/ENOENT/EINVAL still fatal) |
 
 ## 10. Out-of-tree build machinery (not a source patch)
 
