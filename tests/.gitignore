@@ -1,0 +1,4 @@
+# Test run outputs (transcripts, downloaded artifacts, router backups) are
+# ephemeral and may be large; baselines are small evidence and are committed.
+/artifacts/
+/backups/

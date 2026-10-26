@@ -1,0 +1,57 @@
++ date
+Mon Oct 26 16:59:43 CET 2026
++ ip -4 route show
+default via 172.20.10.1 dev phy0-tether proto static src 172.20.10.13 metric 1 
+10.66.0.1 dev devbox_lt proto static scope link 
+172.20.10.0/28 dev phy0-tether proto static scope link metric 1 
+192.168.1.0/24 dev br-lan proto kernel scope link src 192.168.1.1 
+192.168.2.0/24 dev br-guest proto kernel scope link src 192.168.2.1 
+===
++ echo '==='
++ ip -6 route show
+fd12:3456:789a::/64 dev br-lan proto static metric 1024 pref medium
+unreachable fd12:3456:789a::/48 dev lo proto static metric 2147483647 pref medium
+fe80::/64 dev eth0 proto kernel metric 256 pref medium
+fe80::/64 dev br-guest proto kernel metric 256 pref medium
+fe80::/64 dev br-lan proto kernel metric 256 pref medium
+fe80::/64 dev phy0-tether proto kernel metric 256 pref medium
+===
++ echo '==='
++ ip -br link
+lo               UNKNOWN        00:00:00:00:00:00 <LOOPBACK,UP,LOWER_UP> 
+eth0             UP             02:00:00:00:00:01 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+lan1@eth0        LOWERLAYERDOWN 02:00:00:00:00:01 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+lan2@eth0        LOWERLAYERDOWN 02:00:00:00:00:01 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+lan3@eth0        LOWERLAYERDOWN 02:00:00:00:00:01 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+lan4@eth0        LOWERLAYERDOWN 02:00:00:00:00:01 <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+wwan0            DOWN           <POINTOPOINT,MULTICAST,NOARP> 
+br-guest         UP             02:00:00:00:00:02 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+br-lan           UP             02:00:00:00:00:01 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+devbox_lt        UNKNOWN        <POINTOPOINT,NOARP,UP,LOWER_UP> 
+phy1-lan         UP             02:00:00:00:00:04 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy1-guest       UP             02:00:00:00:00:05 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy1-guest-owe   UP             02:00:00:00:00:06 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy0-lan         UP             02:00:00:00:00:03 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy0-guest       UP             02:00:00:00:00:07 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy0-guest-owe   UP             02:00:00:00:00:02 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+phy0-tether      UP             02:00:00:00:00:08 <BROADCAST,MULTICAST,UP,LOWER_UP> 
+===
++ echo '==='
++ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+eth0             UP             fe80::ff:fe00:1/64 
+lan1@eth0        LOWERLAYERDOWN 
+lan2@eth0        LOWERLAYERDOWN 
+lan3@eth0        LOWERLAYERDOWN 
+lan4@eth0        LOWERLAYERDOWN 
+wwan0            DOWN           
+br-guest         UP             192.168.2.1/24 fe80::ff:fe00:2/64 
+br-lan           UP             192.168.1.1/24 fd12:3456:789a::1/60 fe80::ff:fe00:1/64 
+devbox_lt        UNKNOWN        10.66.0.2/32 
+phy1-lan         UP             
+phy1-guest       UP             
+phy1-guest-owe   UP             
+phy0-lan         UP             
+phy0-guest       UP             
+phy0-guest-owe   UP             
+phy0-tether      UP             172.20.10.13/28 fe80::ff:fe00:8/64 

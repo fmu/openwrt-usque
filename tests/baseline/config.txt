@@ -1,0 +1,352 @@
+=== uci-show-network
+network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1/8'
+network.globals=globals
+network.globals.dhcp_default_duid='000400000000000000000000000000000000'
+network.globals.ula_prefix='fd12:3456:789a::/48'
+network.globals.packet_steering='1'
+network.@device[0]=device
+network.@device[0].name='br-lan'
+network.@device[0].type='bridge'
+network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4'
+network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.lan.ipaddr='192.168.1.1/24'
+network.lan.ip6assign='60'
+network.lan.multipath='off'
+network.lan.ip6addr='fd12:3456:789a::1/60'
+network.tether0=interface
+network.tether0.proto='dhcp'
+network.tether0.multipath='off'
+network.tether0.device='phy0-tether'
+network.tether0.metric='1'
+network.tether0.type='bridge'
+network.wan0=interface
+network.wan0.proto='modemmanager'
+network.wan0.auto='0'
+network.wan0.device='/sys/devices/platform/soc/8af8800.usb/8a00000.usb/xhci-hcd.0.auto/usb2/2-1'
+network.wan0.allowedauth='none'
+network.wan0.iptype='ipv4v6'
+network.wan0.loglevel='ERR'
+network.wan0.multipath='off'
+network.wan0.metric='10'
+network.@device[1]=device
+network.@device[1].type='bridge'
+network.@device[1].name='br-guest'
+network.@device[1].bridge_empty='1'
+network.guest=interface
+network.guest.proto='static'
+network.guest.device='br-guest'
+network.guest.ipaddr='192.168.2.1'
+network.guest.netmask='255.255.255.0'
+network.guest.gateway='192.168.1.1'
+network.guest.broadcast='192.168.2.255'
+network.guest.multipath='off'
+network.guest.dns='192.168.2.1'
+network.warp0=interface
+network.warp0.proto='static'
+network.warp0.device='warp0'
+network.warp0.ipaddr='172.16.0.2'
+network.warp0.netmask='255.255.255.255'
+network.warp0.gateway='162.159.198.2'
+network.warp0.multipath='off'
+network.warp0.delegate='0'
+network.warp0.metric='20'
+network.warp0_v6=interface
+network.warp0_v6.proto='static'
+network.warp0_v6.device='warp0'
+network.warp0_v6.ip6gw='2606:4700:103::2'
+network.warp0_v6.sourcefilter='0'
+network.warp0_v6.ip6addr='<WARP_CLIENT_IPV6>'
+network.devbox_lt=interface
+network.devbox_lt.proto='wireguard'
+network.devbox_lt.private_key='<REDACTED_WIREGUARD_PRIVATE_KEY>'
+network.devbox_lt.listen_port='51820'
+network.devbox_lt.delegate='0'
+network.devbox_lt.addresses='10.66.0.2/32'
+network.devbox_lt_peer=wireguard_devbox_lt
+network.devbox_lt_peer.public_key='<REDACTED_WIREGUARD_PEER_PUBLIC_KEY>'
+network.devbox_lt_peer.endpoint_host='devbox.example.net'
+network.devbox_lt_peer.endpoint_port='51820'
+network.devbox_lt_peer.persistent_keepalive='25'
+network.devbox_lt_peer.route_allowed_ips='1'
+network.devbox_lt_peer.allowed_ips='10.66.0.1/32'
+=== uci-show-firewall
+firewall.@defaults[0]=defaults
+firewall.@defaults[0].input='REJECT'
+firewall.@defaults[0].output='ACCEPT'
+firewall.@defaults[0].forward='REJECT'
+firewall.@defaults[0].synflood_protect='1'
+firewall.@zone[0]=zone
+firewall.@zone[0].name='lan'
+firewall.@zone[0].input='ACCEPT'
+firewall.@zone[0].output='ACCEPT'
+firewall.@zone[0].forward='ACCEPT'
+firewall.@zone[0].network='lan'
+firewall.@zone[1]=zone
+firewall.@zone[1].name='wan'
+firewall.@zone[1].input='REJECT'
+firewall.@zone[1].output='ACCEPT'
+firewall.@zone[1].forward='DROP'
+firewall.@zone[1].masq='1'
+firewall.@zone[1].mtu_fix='1'
+firewall.@zone[1].masq6='1'
+firewall.@zone[1].network='tether0' 'wan0' 'warp0' 'warp0_v6'
+firewall.@forwarding[0]=forwarding
+firewall.@forwarding[0].src='lan'
+firewall.@forwarding[0].dest='wan'
+firewall.@rule[0]=rule
+firewall.@rule[0].name='Allow-DHCP-Renew'
+firewall.@rule[0].src='wan'
+firewall.@rule[0].proto='udp'
+firewall.@rule[0].dest_port='68'
+firewall.@rule[0].target='ACCEPT'
+firewall.@rule[0].family='ipv4'
+firewall.@rule[1]=rule
+firewall.@rule[1].name='Allow-Ping'
+firewall.@rule[1].src='wan'
+firewall.@rule[1].proto='icmp'
+firewall.@rule[1].icmp_type='echo-request'
+firewall.@rule[1].family='ipv4'
+firewall.@rule[1].target='ACCEPT'
+firewall.@rule[2]=rule
+firewall.@rule[2].name='Allow-IGMP'
+firewall.@rule[2].src='wan'
+firewall.@rule[2].proto='igmp'
+firewall.@rule[2].family='ipv4'
+firewall.@rule[2].target='ACCEPT'
+firewall.@rule[3]=rule
+firewall.@rule[3].name='Allow-DHCPv6'
+firewall.@rule[3].src='wan'
+firewall.@rule[3].proto='udp'
+firewall.@rule[3].dest_port='546'
+firewall.@rule[3].family='ipv6'
+firewall.@rule[3].target='ACCEPT'
+firewall.@rule[4]=rule
+firewall.@rule[4].name='Allow-MLD'
+firewall.@rule[4].src='wan'
+firewall.@rule[4].proto='icmp'
+firewall.@rule[4].src_ip='fe80::/10'
+firewall.@rule[4].icmp_type='130/0' '131/0' '132/0' '143/0'
+firewall.@rule[4].family='ipv6'
+firewall.@rule[4].target='ACCEPT'
+firewall.@rule[5]=rule
+firewall.@rule[5].name='Allow-ICMPv6-Input'
+firewall.@rule[5].src='wan'
+firewall.@rule[5].proto='icmp'
+firewall.@rule[5].icmp_type='echo-request' 'echo-reply' 'destination-unreachable' 'packet-too-big' 'time-exceeded' 'bad-header' 'unknown-header-type' 'router-solicitation' 'neighbour-solicitation' 'router-advertisement' 'neighbour-advertisement'
+firewall.@rule[5].limit='1000/sec'
+firewall.@rule[5].family='ipv6'
+firewall.@rule[5].target='ACCEPT'
+firewall.@rule[6]=rule
+firewall.@rule[6].name='Allow-ICMPv6-Forward'
+firewall.@rule[6].src='wan'
+firewall.@rule[6].dest='*'
+firewall.@rule[6].proto='icmp'
+firewall.@rule[6].icmp_type='echo-request' 'echo-reply' 'destination-unreachable' 'packet-too-big' 'time-exceeded' 'bad-header' 'unknown-header-type'
+firewall.@rule[6].limit='1000/sec'
+firewall.@rule[6].family='ipv6'
+firewall.@rule[6].target='ACCEPT'
+firewall.@rule[7]=rule
+firewall.@rule[7].name='Allow-IPSec-ESP'
+firewall.@rule[7].src='wan'
+firewall.@rule[7].dest='lan'
+firewall.@rule[7].proto='esp'
+firewall.@rule[7].target='ACCEPT'
+firewall.@rule[8]=rule
+firewall.@rule[8].name='Allow-ISAKMP'
+firewall.@rule[8].src='wan'
+firewall.@rule[8].dest='lan'
+firewall.@rule[8].dest_port='500'
+firewall.@rule[8].proto='udp'
+firewall.@rule[8].target='ACCEPT'
+firewall.@zone[2]=zone
+firewall.@zone[2].name='guest'
+firewall.@zone[2].input='REJECT'
+firewall.@zone[2].output='ACCEPT'
+firewall.@zone[2].forward='REJECT'
+firewall.@zone[2].network='guest'
+firewall.@forwarding[1]=forwarding
+firewall.@forwarding[1].src='guest'
+firewall.@forwarding[1].dest='wan'
+firewall.@rule[9]=rule
+firewall.@rule[9].src='guest'
+firewall.@rule[9].name='Guest-DNS'
+firewall.@rule[9].dest_port='53'
+firewall.@rule[9].target='ACCEPT'
+firewall.@rule[10]=rule
+firewall.@rule[10].src='guest'
+firewall.@rule[10].name='Guest-DHCP'
+firewall.@rule[10].proto='udp'
+firewall.@rule[10].dest_port='67'
+firewall.@rule[10].target='ACCEPT'
+firewall.@rule[10].family='ipv4'
+firewall.@rule[11]=rule
+firewall.@rule[11].name='Guest-DHCP-Renew'
+firewall.@rule[11].family='ipv4'
+firewall.@rule[11].proto='udp'
+firewall.@rule[11].dest_port='68'
+firewall.@rule[11].target='ACCEPT'
+firewall.@rule[11].dest='guest'
+firewall.@rule[12]=rule
+firewall.@rule[12].src='guest'
+firewall.@rule[12].name='Guest-SSH'
+firewall.@rule[12].proto='tcp'
+firewall.@rule[12].dest_port='22'
+firewall.@rule[12].target='ACCEPT'
+firewall.@forwarding[2]=forwarding
+firewall.@forwarding[2].src='lan'
+firewall.@forwarding[2].dest='guest'
+firewall.devbox_lt=zone
+firewall.devbox_lt.name='devbox_lt'
+firewall.devbox_lt.input='REJECT'
+firewall.devbox_lt.output='ACCEPT'
+firewall.devbox_lt.forward='REJECT'
+firewall.devbox_lt.masq='0'
+firewall.devbox_lt.mtu_fix='1'
+firewall.devbox_lt.network='devbox_lt'
+firewall.devbox_lt_allow=rule
+firewall.devbox_lt_allow.name='Allow-egress-proxy'
+firewall.devbox_lt_allow.src='devbox_lt'
+firewall.devbox_lt_allow.proto='tcp'
+firewall.devbox_lt_allow.dest_port='8888'
+firewall.devbox_lt_allow.target='ACCEPT'
+=== df
+Filesystem                Size      Used Available Use% Mounted on
+/dev/root                 4.5M      4.5M         0 100% /rom
+tmpfs                   120.2M      2.2M    118.0M   2% /tmp
+/dev/ubi0_2              18.6M     14.3M      3.3M  81% /overlay
+overlayfs:/overlay       18.6M     14.3M      3.3M  81% /
+tmpfs                   512.0K         0    512.0K   0% /dev
+=== opkg/apk
+adb-5.0.2~6fe92d1a-r5
+apk-mbedtls-3.0.5-r3
+ath10k-board-qca4019-20260221-r1
+ath10k-firmware-qca4019-ct-2023.04.04-r1
+attendedsysupgrade-common-10
+base-files-1718~981c978eff
+bind-dig-9.20.30-r1
+bind-libs-9.20.30-r1
+busybox-1.37.0-r6
+ca-bundle-20260816-r2
+ca-certificates-20260816-r2
+cgi-io-2026.07.21~31cb3c89-r1
+curl-8.23.0-r1
+dawn-2025.11.07~7414c34a-r1
+dbus-1.16.2-r4
+dnsmasq-2.93-r1
+dropbear-2025.89-r3
+firewall4-2025.03.17~b6e51575-r2
+fstools-2026.05.23~16718b6e-r1
+fwtool-2025.10.03~04cd252e-r1
+getrandom-2025.10.30~6f78fa49-r1
+glib2-2.82.0-r1
+hostapd-common-2025.08.26~ca266cc2-r6
+hostapd-utils-2025.08.26~ca266cc2-r6
+https-dns-proxy-2026.05.06-r1
+i2c-tools-4.4-r2
+ip-tiny-6.18.0-r2
+ip6tables-nft-1.8.10-r3
+ipq-wifi-zte_mf287plus-2026.05.18~e20f4c6f-r1
+ipset-7.24-r1
+iptables-mod-conntrack-extra-1.8.10-r3
+iptables-mod-ipopt-1.8.10-r3
+iptables-nft-1.8.10-r3
+iw-6.17-r1
+jansson4-2.14.1-r1
+jshn-2026.06.19~7dd12784-r1
+jsonfilter-2026.03.16~b9034210-r1
+kernel-6.12.112~1ef2780854971e23a655b05e5b5c3630-r1
+kmod-ath-6.12.112.6.18.55-r2
+kmod-ath10k-ct-6.12.112.2025.12.01~bb84e159-r1
+kmod-cfg80211-6.12.112.6.18.55-r2
+kmod-crypto-aead-6.12.112-r1
+kmod-crypto-ccm-6.12.112-r1
+kmod-crypto-cmac-6.12.112-r1
+kmod-crypto-crc32c-6.12.112-r1
+kmod-crypto-ctr-6.12.112-r1
+kmod-crypto-gcm-6.12.112-r1
+kmod-crypto-geniv-6.12.112-r1
+kmod-crypto-gf128-6.12.112-r1
+kmod-crypto-ghash-6.12.112-r1
+kmod-crypto-hash-6.12.112-r1
+kmod-crypto-hmac-6.12.112-r1
+kmod-crypto-kpp-6.12.112-r1
+kmod-crypto-lib-chacha20-6.12.112-r1
+kmod-crypto-lib-chacha20poly1305-6.12.112-r1
+kmod-crypto-lib-curve25519-6.12.112-r1
+kmod-crypto-lib-poly1305-6.12.112-r1
+kmod-crypto-manager-6.12.112-r1
+kmod-crypto-null-6.12.112-r1
+kmod-crypto-rng-6.12.112-r1
+kmod-crypto-seqiv-6.12.112-r1
+kmod-crypto-sha3-6.12.112-r1
+kmod-crypto-sha512-6.12.112-r1
+kmod-gpio-button-hotplug-6.12.112-r5
+kmod-hwmon-core-6.12.112-r1
+kmod-i2c-algo-bit-6.12.112-r1
+kmod-i2c-core-6.12.112-r1
+kmod-i2c-gpio-6.12.112-r1
+kmod-ip6tables-6.12.112-r1
+kmod-ipt-conntrack-6.12.112-r1
+kmod-ipt-conntrack-extra-6.12.112-r1
+kmod-ipt-core-6.12.112-r1
+kmod-ipt-ipopt-6.12.112-r1
+kmod-ipt-ipset-6.12.112-r1
+kmod-leds-gpio-6.12.112-r1
+kmod-lib-crc-ccitt-6.12.112-r1
+kmod-lib-crc32c-6.12.112-r1
+kmod-mac80211-6.12.112.6.18.55-r2
+kmod-mhi-bus-6.12.112-r1
+kmod-mhi-wwan-ctrl-6.12.112-r1
+=== usque-files
+drwxr-xr-x    2 root     root           360 Oct 17 23:52 .
+drwxr-xr-x    1 root     root          4992 Oct 26 16:32 ..
+-rwxr-xr-x    1 root     root           249 Oct 24 18:47 down.sh
+-rwxr-xr-x    1 root     root           933 Oct 24 18:47 up.sh
+-rw-r--r--    1 root     root           710 Oct 24 18:47 warp0.json
+=== initd
+=== modules
+ath                    20480  1 ath10k_core
+ath10k_core           471040  1 ath10k_pci
+ath10k_pci             45056  0 
+cdc_wdm                16384  2 qmi_wwan
+cfg80211              311296  3 ath10k_core,ath,mac80211
+ch341                  12288  0 
+chacha_neon            28672  1 libchacha20poly1305
+cmac                   12288  5 
+compat                 12288  2 mac80211,cfg80211
+crc_ccitt              12288  1 ppp_async
+crc32c_generic         12288  1 
+curve25519_neon        24576  1 wireguard
+dwc3                   40960  0 
+dwc3_qcom              12288  0 
+ghash_arm_ce           24576  0 
+gpio_button_hotplug    12288  0 
+hwmon                  20480  1 ath10k_core
+i2c_algo_bit           12288  1 i2c_gpio
+i2c_gpio               12288  0 
+ip_set                 32768 17 xt_set,ip_set_list_set,ip_set_hash_netportnet,ip_set_hash_netport,ip_set_hash_netnet,ip_set_hash_netiface,ip_set_hash_net,ip_set_hash_mac,ip_set_hash_ipportnet,ip_set_hash_ipportip,ip_set_hash_ipport,ip_set_hash_ipmark,ip_set_hash_ipmac,ip_set_hash_ip,ip_set_bitmap_port,ip_set_bitmap_ipmac,ip_set_bitmap_ip
+ip_set_bitmap_ip       16384  0 
+ip_set_bitmap_ipmac    16384  0 
+ip_set_bitmap_port     12288  0 
+ip_set_hash_ip         32768  0 
+ip_set_hash_ipmac      32768  0 
+ip_set_hash_ipmark     32768  2 
+ip_set_hash_ipport     36864  0 
+ip_set_hash_ipportip   32768  0 
+ip_set_hash_ipportnet   36864  0 
+ip_set_hash_mac        20480  0 
+ip_set_hash_net        36864  5 
+ip_set_hash_netiface   36864  0 
+ip_set_hash_netnet     40960  0 
+ip_set_hash_netport    36864  0 
+ip_set_hash_netportnet   40960  0 
+ip_set_list_set        16384  1 
+ip_tables              20480  2 iptable_mangle,iptable_filter
+ip6_tables             20480  2 ip6table_mangle,ip6table_filter
+ip6_udp_tunnel         12288  1 wireguard
+ip6t_REJECT            12288  0 
