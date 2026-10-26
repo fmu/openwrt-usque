@@ -19,7 +19,7 @@
 #   OUT_DIR        output directory       (default <repo>/dist)
 #   MAX_SIZE_BYTES size gate in bytes     (default 3355443 = 3.2 MiB)
 #   SKIP_SIZE_CHECK=1  do not fail on size
-#   FEATURES       cargo feature list     (default: crate defaults = quinn,http2)
+#   FEATURES       cargo feature list     (default: crate defaults = quinn HTTP/3 only)
 #   CARGO_PROFILE  cargo profile          (default release)
 set -euo pipefail
 
