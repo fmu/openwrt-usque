@@ -30,9 +30,12 @@ ip route replace default dev "$USQUE_IFACE" metric 0 \
   || logger -t usque-test "p1-up: default route failed"
 
 # Emergency unwind: if the orchestrating shell dies without cleanup, remove
-# our routes after 150s. Cancel by deleting $DIR/armed.
+# our routes after WATCHDOG_SECS (default 150; raise it in wan.env for longer
+# manual tests). Cancel by deleting $DIR/armed.
+. "$DIR/wan.env" 2>/dev/null
+WD="${WATCHDOG_SECS:-150}"
 : > "$DIR/armed"
-( sleep 150; [ -f "$DIR/armed" ] && "$DIR/emergency-cleanup.sh" ) >/dev/null 2>&1 &
+( sleep "$WD"; [ -f "$DIR/armed" ] && "$DIR/emergency-cleanup.sh" ) >/dev/null 2>&1 &
 echo $! > "$DIR/watchdog.pid"
 
 logger -t usque-test "p1-up: default=$(ip route show default | tr '\n' ';')"

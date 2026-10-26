@@ -23,6 +23,11 @@ for arg in "$@"; do
 done
 
 IFACE=warp9
+# SAFETY: taking over the default route is the *point* of this test, but it must
+# be an explicit, acknowledged action (the router carries the user's internet).
+# Set PHASE1_ALLOW_DEFAULT_ROUTE=1 to run the routing/egress checks; without it
+# the harness only proves tunnel establishment and never touches the default route.
+ALLOW_DEFAULT_ROUTE="${PHASE1_ALLOW_DEFAULT_ROUTE:-0}"
 SUBCMD="${USQUE_SUBCMD:-native-tun}"   # upstream Go build uses "nativetun"
 EXPECT_MTU="${EXPECT_MTU:-1400}"       # upstream Go build defaults to 1280
 LOG="${PHASE1_LOG:-$ART_DIR/phase1-$(date +%Y%m%d-%H%M%S).log}"
@@ -106,12 +111,12 @@ CLIOUT=$(rt "/tmp/usque-test/usque --help; echo '===== $SUBCMD --help ====='; /t
 printf '%s\n' "$CLIOUT" > "$ART_DIR/usque-help.txt"
 printf '%s\n' "$CLIOUT" | sed 's/^/  | /'
 has_flag() { printf '%s' "$CLIOUT" | grep -q -- "$1" && echo 1 || echo 0; }
-H2_SUPPORTED=$(has_flag -- '--http2')
-HAS_ALWAYS_RECONNECT=$(has_flag -- '--always-reconnect')
-HAS_KEEPALIVE=$(has_flag -- '--keepalive-period')
-HAS_RECONNECT=$(has_flag -- '--reconnect-delay')
-HAS_MTU=$(has_flag -- '-m, --mtu')
-HAS_AUTO_REGISTER=$(has_flag -- '--auto-register')
+H2_SUPPORTED=$(has_flag '--http2')
+HAS_ALWAYS_RECONNECT=$(has_flag '--always-reconnect')
+HAS_KEEPALIVE=$(has_flag '--keepalive-period')
+HAS_RECONNECT=$(has_flag '--reconnect-delay')
+HAS_MTU=$(has_flag '--mtu')
+HAS_AUTO_REGISTER=$(has_flag '--auto-register')
 info "capabilities: http2=$H2_SUPPORTED always-reconnect=$HAS_ALWAYS_RECONNECT keepalive=$HAS_KEEPALIVE reconnect-delay=$HAS_RECONNECT mtu=$HAS_MTU auto-register=$HAS_AUTO_REGISTER"
 if printf '%s' "$CLIOUT" | grep -qE "native-?tun"; then ok "native-tun/subcommand present"; record "CLI: native-tun subcommand" PASS; else bad "subcommand missing from help"; record "CLI: native-tun subcommand" FAIL; fi
 [ "$H2_SUPPORTED" = 1 ] && record "CLI: --http2 present" PASS || record "CLI: --http2 present" SKIP
@@ -158,6 +163,20 @@ run_carrier() { # run_carrier <udp|http2>
       ;;
   esac
   START_LATENCY=$elapsed
+
+  if [ "$ALLOW_DEFAULT_ROUTE" != 1 ]; then
+    log "3b. Default-route takeover NOT requested (PHASE1_ALLOW_DEFAULT_ROUTE!=1)"
+    info "verifying tunnel only: the router keeps its WAN default route untouched"
+    rt "ip -br link show $IFACE; ip -4 addr show dev $IFACE | grep inet; ip link show $IFACE | head -1" | sed 's/^/  | /'
+    record "$carrier tunnel-only (no default-route takeover)" PASS
+    log "3c. Stop test instance (routes never touched)"
+    rt 'sh /tmp/usque-test/emergency-cleanup.sh warp9'
+    sleep 1
+    POST=$(rt 'ip -4 route show default; ip -6 route show default; ip rule show | head -3; curl -m 12 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+    printf '%s\n' "$POST" | sed 's/^/  | /'
+    record "$carrier WAN default untouched" PASS
+    return 0
+  fi
 
   log "4. Tunnel state ($carrier)"
   TUN_STATE=$(rt "echo === link; ip -br link show $IFACE; echo === addr; ip -4 addr show dev $IFACE; ip -6 addr show dev $IFACE; echo === mtu; ip link show $IFACE | head -1; echo === routes; ip -4 route show; echo === hook; cat /tmp/usque-test/hook-connect.txt 2>/dev/null")

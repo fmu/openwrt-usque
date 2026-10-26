@@ -30,6 +30,56 @@ touching the default route (harmless TEST-NET route `203.0.113.9/32`): added via
 `phy0-tether`, removed, `emergency-cleanup.sh` ran idempotently, default route and WAN
 egress unchanged. `warp9` was never created outside the trap-protected phase-1 run.
 
+## Safety protocol (and one incident, 2026-10-26 ~18:00 CET)
+
+Testing "does WARP actually carry traffic" necessarily means pointing the router's default
+route at the tunnel for a few seconds. Phase-1 runs do exactly that and then revert it in an
+`EXIT` trap plus an on-router watchdog. During manual debugging at ~17:59 the user noticed the
+temporary takeover and restored connectivity manually (removed the route, killed the test
+process). Verified afterwards: WAN default `via 172.20.10.1 dev phy0-tether metric 1` only, no
+`warp9`, no test `ip rule`s, `curl trace → warp=off`, DNS + LAN fine. Thanks — that was a
+test artifact, not a product behaviour.
+
+From now on:
+
+- Baseline/install/service tests (`tests/phase2.sh`) **never** touch the default route: with the
+  v2 package defaults (`default_route=0`) the router's WAN default must be unchanged before and
+  after start.
+- The route-takeover part of `tests/phase1.sh` now requires an explicit
+  `PHASE1_ALLOW_DEFAULT_ROUTE=1`; without it the harness only proves tunnel establishment and
+  reports that the WAN default was untouched. Runs that install a default route print the
+  revert result at the end.
+- Opt-in routing (`default_route=1`) is tested only in a short, explicitly requested window,
+  with `ip route` checked before/after, and reverted immediately.
+- Every script keeps its trap + watchdog cleanup; every report includes the router's final state.
+
+## IPv6 through the tunnel — **works**, needed a v6 policy rule
+
+Earlier phase-1 runs recorded IPv6 as SKIP with `curl -6` timing out. Root cause found (Lead
+proved it, I reproduced it here): **mwan3's IPv6 fwmark rules**. With a v6 default route via the
+tunnel, mwan3's `ip -6 rule 2062 fwmark 0x3e00/0x3f00 unreachable` (and its nft marks) sends v6
+traffic to a blackhole; `ping -6` returned `sendto: Network unreachable`, and outgoing v6
+packets were dropped before reaching the tunnel.
+
+Fix — same policy override as for IPv4, but for the v6 ruleset (verified live):
+
+```sh
+ip -6 rule add priority 1000 from all lookup main   # remove on disconnect
+ip -6 route replace default dev warp9 metric 0      # v6_route=auto equivalent
+```
+
+Live result with the official CI binary (`usque` sha256 `492b89b3…`):
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| `curl -6 https://www.cloudflare.com/cdn-cgi/trace` | PASS | `ip=<WARP_EGRESS_IP>`, `colo=VIE`, `loc=AT`, `warp=on`, HTTP 200 |
+| `ping -6 2606:4700:4700::1111` through tunnel | PASS | 2/2 packets, 0% loss, ~116 ms |
+| v4 control at the same time | PASS | `warp=off` with no v4 default takeover (v4 default untouched) |
+
+So IPv6 needs no daemon change: the v2 hook must install a v6 policy rule (priority 1000,
+`lookup main`) whenever it installs a v6 default route, and remove it on teardown — exactly what
+packager is doing for `ipv6_route=auto`. LAN IPv6/NAT66 still to be validated with the v2 package.
+
 ## Environment-control probe — upstream Go usque v4.2.1 (2026-10-26 17:09 CET)
 
 Purpose: validate the router environment and the routing plan before the Rust binary exists.

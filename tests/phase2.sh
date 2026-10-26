@@ -24,7 +24,9 @@ STEP="${1:-}"
 IFACE=warp0
 FEED_PORT="${FEED_PORT:-8123}"
 FEED_HOST="${FEED_HOST:-192.168.1.240}"
-FEED_URL="http://$FEED_HOST:$FEED_PORT/packages.adb"
+FEED_MODE="${FEED_MODE:-http}"          # http | file | pages
+PAGES_URL="https://fmu.github.io/openwrt-usque/feed/packages.adb"
+RT_FEED_DIR="$ROUTER_TMP/feed"
 PKG_LOG="$ART_DIR/phase2-transcript.log"
 PASS=0; FAIL=0; SKIP=0; declare -a CHECKS
 LAST=PASS
@@ -102,14 +104,35 @@ step_stale() {
 }
 
 step_feed() {
-  log "3. Signed feed install"
+  log "3. Signed feed install (mode=$FEED_MODE)"
   : > "$PKG_LOG"
   local before_free; before_free=$(df_free); info "overlay free before: ${before_free}K"
-  serve_feed || return 1
+  case "$FEED_MODE" in
+    http)
+      serve_feed || return 1
+      FEED_URL="http://$FEED_HOST:$FEED_PORT/packages.adb" ;;
+    file)
+      [ -n "${FEED_DIR:-}" ] && [ -d "$FEED_DIR" ] || { bad "FEED_DIR not set/found"; record "local file feed"; return 1; }
+      rt "rm -rf $RT_FEED_DIR; mkdir -p $RT_FEED_DIR"
+      ( cd "$FEED_DIR" && find . -maxdepth 1 -type f | sed 's|^\./||' ) | while read -r f; do rtpush "$FEED_DIR/$f" "$RT_FEED_DIR/$f"; done
+      show "$(rt "ls -la $RT_FEED_DIR")"
+      FEED_URL="file://$RT_FEED_DIR/packages.adb" ;;
+    pages)
+      FEED_URL="$PAGES_URL" ;;
+    *) bad "unknown FEED_MODE=$FEED_MODE"; record "feed mode"; return 1 ;;
+  esac
+  info "repository: $FEED_URL"
 
   # public key -> /etc/apk/keys; repo -> /etc/apk/repositories.d
-  local keyfile; keyfile=$(find "${FEED_DIR:?}" -maxdepth 1 -name '*.pem' -o -maxdepth 1 -name '*.pub' | head -1)
-  [ -n "$keyfile" ] || { bad "no public key in $FEED_DIR"; record "feed public key present"; return 1; }
+  local keyfile; keyfile=$(find "${FEED_DIR:-/nonexistent}" -maxdepth 1 \( -name '*.pem' -o -name '*.pub' \) 2>/dev/null | head -1)
+  if [ -z "$keyfile" ] && [ "$FEED_MODE" = pages ]; then
+    keyfile=/tmp/usque-pages-key.pem
+    curl -m 15 -sS -o "$keyfile" "https://fmu.github.io/openwrt-usque/feed/usque.pem" || true
+  fi
+  [ -n "$keyfile" ] && [ -s "$keyfile" ] || { bad "no public key found"; record "feed public key present"; return 1; }
+  if [ "$FEED_MODE" = pages ]; then
+    ok "Pages feed key downloaded ($(wc -c < "$keyfile") bytes)"
+  fi
   info "public key: $keyfile ($(wc -c < "$keyfile") bytes) sha256 $(shasum -a 256 "$keyfile" | awk '{print $1}')"
   rt "mkdir -p /etc/apk/keys /etc/apk/repositories.d; cat > /etc/apk/keys/$(basename "$keyfile")" < "$keyfile"
   rt "echo '$FEED_URL' > /etc/apk/repositories.d/usque.list; cat /etc/apk/repositories.d/usque.list"
@@ -159,6 +182,8 @@ step_service() {
   echo "$T" | grep -q "$IFACE" && { ok "$IFACE present"; record "service tun device"; } || { bad "no $IFACE"; record "service tun device"; }
   echo "$T" | grep -q "default dev $IFACE" && { ok "default route via $IFACE"; record "service default route via tun"; } || { bad "default route not via $IFACE"; record "service default route via tun"; }
   echo "$T" | grep -qi "masq" && { ok "firewall zone/masq referenced"; record "firewall zone + masq"; } || info "no masq match in nft snippet"
+  PRULE=$(rt "ip rule show | grep -E '^1000:.*lookup main'")
+  if [ -n "$PRULE" ]; then ok "packaged hook installed policy rule: $PRULE"; record "packaged hook policy rule (mwan3)"; else bad "no priority-1000 main-table rule -> mwan3 will divert traffic"; record "packaged hook policy rule (mwan3)"; fi
 
   log "4c. Router-originated egress through the service"
   TRACE=$(rt 'curl -m 20 -s https://www.cloudflare.com/cdn-cgi/trace'); show "$TRACE"
@@ -216,6 +241,10 @@ step_service() {
   show "$POSTSTOP"
   echo "$POSTSTOP" | grep -q "^default via " && { ok "stop restored WAN default route"; record "service stop restores WAN route"; } || { bad "WAN default route not restored after stop"; record "service stop restores WAN route"; }
   echo "$POSTSTOP" | grep -q 'warp=off' && { ok "stop restored WAN egress (warp=off)"; record "service stop restores warp=off"; } || { bad "egress still via tunnel"; record "service stop restores warp=off"; }
+  RULE_LEFT=$(rt "ip rule show | grep -cE '^1000:.*lookup main'")
+  [ "${RULE_LEFT:-0}" -eq 0 ] && { ok "policy rule removed on stop (mwan3 rules intact)"; record "service stop removes policy rule"; } || { bad "policy rule left behind after stop"; record "service stop removes policy rule"; }
+  MWAN_RULES=$(rt "ip rule show | grep -cE 'fwmark .*lookup 1'")
+  [ "${MWAN_RULES:-0}" -ge 1 ] && { ok "mwan3 fwmark rules still intact ($MWAN_RULES)"; record "mwan3 rules intact after stop"; } || info "mwan3 fwmark rules not found (mwan3 may be off)"
   rt '/etc/init.d/usque start'; sleep 6
   rt "ip link show $IFACE >/dev/null 2>&1" && { ok "start after stop works"; record "service start after stop"; } || { bad "start after stop failed"; record "service start after stop"; }
 }
