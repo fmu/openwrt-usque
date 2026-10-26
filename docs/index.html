@@ -21,6 +21,9 @@
 <!--
   v2 draft notes (remove once the 0.2.x artifacts are final):
   - installed/download sizes are still placeholders ("about 3 MB" / "under 3 MB")
+  - the client has a --protocol flag (default cf-connect-ip; --protocol connect-ip for
+    non-Cloudflare MASQUE servers) that the packaged init does not map yet; not documented
+    until we know whether a UCI option is coming
   - version/footer shows 0.2.0-r1, matching PKG_VERSION 0.2.0 + PKG_RELEASE 1 in openwrt/usque
   - UCI/behaviour text follows openwrt/usque v2 (init + hook + firewall + lan_ipv6) and the
     LuCI labels in openwrt/luci-app-usque; re-check if the UI changes before release
@@ -506,6 +509,9 @@ apk update</code></pre>
         as before. The only default routing change is IPv6: when the router has no native IPv6 default
         route, <code>ipv6_route=auto</code> installs a tunnel IPv6 default route (plus its IPv6 policy
         rule) so IPv6 works on IPv4-only WANs. Stop or disable removes everything usque added.</p>
+        <p class="fineprint">Verified on the live test router: with the defaults, IPv4 egress stayed
+        <code>warp=off</code> (no IPv4 default route touched) while IPv6 egress through the tunnel was
+        <code>warp=on</code>, on an IPv4-only uplink.</p>
       </div>
 
       <h3>Routing options</h3>
@@ -595,7 +601,8 @@ apk update</code></pre>
               default route is installed, so mwan3-style fwmark rules cannot divert traffic away from
               the main table. With defaults no rule is installed and mwan3 is untouched. Ownership is
               ref-counted across connections: the rule is removed when the last routing connection
-              stops.</td>
+              stops (and cleaned up from kernel state if the run-state directory was lost). A
+              priority-1000 rule that already existed before usque started is left in place.</td>
             </tr>
             <tr>
               <th scope="row">DNS</th>
