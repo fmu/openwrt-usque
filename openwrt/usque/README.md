@@ -76,6 +76,7 @@ Per-connection section options:
 | `device_name` | *(empty)* | device name passed to `usque register -n` |
 | `log_level` | `info` | `RUST_LOG` filter for the daemon |
 | `sni` | *(empty)* | TLS SNI for custom endpoints (`-s <sni>`) |
+| `authority` | *(empty)* | CONNECT request authority for custom endpoints (`--authority <host>`) |
 
 ## Routing behaviour
 

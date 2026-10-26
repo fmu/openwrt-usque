@@ -124,7 +124,7 @@ log "Negative test: index must be untrusted without the key"
 NEG="$WORK/root-neg"
 mkdir -p "$NEG/etc/apk/keys"
 set +e
-out="$("$APK" --root "$NEG" --force-no-chroot --arch "$ARCH" \
+out="$("$APK" --root "$NEG" --force-no-chroot --usermode --arch "$ARCH" \
 	--repositories-file /dev/null \
 	--repository "file://$VERIFY/packages.adb" \
 	--keys-dir etc/apk/keys \
@@ -143,7 +143,7 @@ ROOT="$WORK/root"
 mkdir -p "$ROOT/etc/apk/keys"
 install -m 0644 "$FEED_DIR/usque.pem" "$ROOT/etc/apk/keys/usque.pem"
 INSTALL_PKGS="luci-app-usque"
-"$APK" --root "$ROOT" --force-no-chroot --arch "$ARCH" \
+"$APK" --root "$ROOT" --force-no-chroot --usermode --arch "$ARCH" \
 	--repositories-file /dev/null \
 	--repository "file://$VERIFY/packages.adb" \
 	--keys-dir etc/apk/keys \
@@ -164,16 +164,16 @@ log "Installed files"
 [ -x "$ROOT/usr/libexec/rpcd/luci.usque" ] || die "installed root is missing the rpcd backend"
 
 log "apk metadata"
-"$APK" --root "$ROOT" --force-no-chroot --repositories-file /dev/null info || true
+"$APK" --root "$ROOT" --force-no-chroot --usermode --repositories-file /dev/null info || true
 printf '\n'
-"$APK" --root "$ROOT" --force-no-chroot --repositories-file /dev/null info -R usque || true
+"$APK" --root "$ROOT" --force-no-chroot --usermode --repositories-file /dev/null info -R usque || true
 
 log "Sizes"
 report_size() {
 	local name="$1" root="$2"
 	local files installed compressed
 	files="$(mktemp)"
-	"$APK" --root "$root" --force-no-chroot --repositories-file /dev/null info -L "$name" 2>/dev/null \
+	"$APK" --root "$root" --force-no-chroot --usermode --repositories-file /dev/null info -L "$name" 2>/dev/null \
 		| sed 's|^/||' > "$files" || true
 	installed=0
 	while IFS= read -r f; do

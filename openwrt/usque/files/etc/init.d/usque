@@ -40,6 +40,8 @@ load_settings() {
 # function.  Returns 1 if the section is disabled or misconfigured.
 section_options() {
 	local sid="$1"
+	# NOTE: s_* are intentionally global: the caller (start_instance,
+	# stop_instance, echo_iface) reads them after this function returns.
 	config_get_bool s_enabled "$sid" enabled 0
 	config_get s_mode "$sid" mode cloudflare
 	config_get s_config_file "$sid" config_file "/etc/usque/$sid.json"
@@ -56,6 +58,7 @@ section_options() {
 	config_get s_device_name "$sid" device_name ''
 	config_get s_log_level "$sid" log_level info
 	config_get s_sni "$sid" sni ''
+	config_get s_authority "$sid" authority ''
 
 	[ "$s_enabled" = 1 ] || return 1
 
@@ -125,6 +128,7 @@ start_instance() {
 	[ "$s_endpoint_ipv6" = 1 ] && procd_append_param command --ipv6
 	[ "$s_always_reconnect" = 1 ] && procd_append_param command --always-reconnect
 	[ -n "$s_sni" ] && procd_append_param command -s "$s_sni"
+	[ -n "$s_authority" ] && procd_append_param command --authority "$s_authority"
 	procd_set_param env \
 		PATH=/usr/sbin:/usr/bin:/sbin:/bin \
 		RUST_LOG="$s_log_level" \
@@ -147,7 +151,9 @@ start_instance() {
 stop_instance() {
 	local sid="$1" only="$2"
 	[ -z "$only" ] || [ "$only" = "$sid" ] || return 0
-	section_options "$sid" || return 0
+	# Clean up even if the section is disabled now: the values were read
+	# before section_options() returns non-zero.
+	section_options "$sid" || true
 
 	# procd has already terminated the daemon, so its disconnect hook may not
 	# have run: clean up routes/rules explicitly (idempotent).

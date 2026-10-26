@@ -57,7 +57,6 @@ define Build/Compile
 		echo "       run build/build-usque.sh, then copy dist/usque to openwrt/usque/bin/usque"; \
 		exit 1; \
 	}
-	@echo "usque binary: $$(wc -c < "$(USQUE_BINARY)") bytes"
 endef
 
 define Package/usque/install
