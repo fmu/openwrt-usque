@@ -161,7 +161,7 @@ step_feed() {
 
 step_service() {
   log "4. procd service lifecycle"
-  rt 'uci set usque.main.enabled=1; uci commit usque; /etc/init.d/usque enable; echo enabled=$(/etc/init.d/usque enabled && echo yes)'
+  rt 'uci set usque.warp0.enabled=1; uci set usque.warp0.default_route=0; uci commit usque; /etc/init.d/usque enable; echo enabled=$(/etc/init.d/usque enabled && echo yes)'
   rt '/etc/init.d/usque start' | sed 's/^/  | /'
   local i=0 live=0
   while [ "$i" -lt 40 ]; do
@@ -176,6 +176,16 @@ step_service() {
   echo "$S" | grep -qi 'running' && { ok "init status running"; record "init status running"; } || { bad "init status not running"; record "init status running"; }
   echo "$S" | grep -qi 'Connected to MASQUE server\|Tunnel established' && { ok "MASQUE connected per logs"; record "MASQUE connected (service)"; } \
                                                                       || { bad "no MASQUE connect log line"; record "MASQUE connected (service)"; }
+  log "4a0. Default install safety: WAN default must be untouched (default_route=0)"
+  SAFE=$(rt 'ip -4 route show default; echo ===v6; ip -6 route show default; echo ===rule4; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===rule6; ip -6 rule show | grep -E "^1000:.*lookup main" || echo none; echo ===routes_via_tun; ip -4 route show | grep " dev warp0" || echo none')
+  show "$SAFE"
+  case "$SAFE" in *"default via "*"dev phy0-tether"*) ok "WAN IPv4 default route intact"; record "default install: WAN v4 default untouched";; *) bad "WAN IPv4 default route changed by default install"; record "default install: WAN v4 default untouched";; esac
+  case "$SAFE" in *"default"*"dev warp0"*) bad "v4 default was taken over despite default_route=0"; record "default install: no v4 default takeover";; *) ok "no v4 default route via warp0"; record "default install: no v4 default takeover";; esac
+  echo "$SAFE" | sed -n '/===rule4/,/===rule6/p' | grep -q '^1000:' && { bad "priority-1000 v4 rule installed despite default_route=0"; record "default install: no policy rule"; } || { ok "no priority-1000 v4 policy rule"; record "default install: no policy rule"; }
+  INSTALL_EG=$(rt 'curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+  show "egress: $INSTALL_EG"
+  echo "$INSTALL_EG" | grep -q 'warp=off' && { ok "router egress still direct WAN (warp=off) with default_route=0"; record "default install: egress warp=off"; } || { bad "egress changed with default_route=0"; record "default install: egress warp=off"; }
+
   log "4b. tun / routes / firewall"
   T=$(rt "echo === link; ip -br link show $IFACE; echo === addr; ip addr show dev $IFACE; echo === routes; ip -4 route show; echo === route6; ip -6 route show; echo === nft-zone; nft list ruleset | grep -i -A4 usque; echo === fw4-zone; uci show firewall | grep -i warp0")
   show "$T"
@@ -333,7 +343,7 @@ step_uninstall() {
   OUT2=$(rt 'apk add usque luci-app-usque 2>&1'); RC2=$?
   show "$OUT2"
   [ "$RC2" -eq 0 ] && { ok "reinstall from signed feed OK"; record "reinstall after uninstall"; } || { bad "reinstall failed"; record "reinstall after uninstall"; }
-  rt 'uci set usque.main.enabled=1; uci commit usque; /etc/init.d/usque enable; /etc/init.d/usque start' >/dev/null 2>&1
+  rt 'uci set usque.warp0.enabled=1; uci commit usque; /etc/init.d/usque enable; /etc/init.d/usque start' >/dev/null 2>&1
   sleep 8
   rt "ip link show $IFACE >/dev/null 2>&1" && { ok "service up again after reinstall"; record "service up after reinstall"; } || { bad "service not up after reinstall"; record "service up after reinstall"; }
 }
@@ -357,6 +367,97 @@ step_final() {
   ok "final state captured"; record "final state captured"
 }
 
+# ---------------------------------------------------------------- v2 features
+step_optin() {
+  log "9. Opt-in default route (default_route=1) — short window, reverts immediately"
+  log "9a. pre-state"
+  PRE=$(rt 'ip -4 route show default; ip -6 route show default; ip rule show | grep -E "^1000:.*lookup main" || echo "no rule1000"; ip -6 rule show | grep -E "^1000:.*lookup main" || echo "no v6rule1000"')
+  show "$PRE"
+  rt 'uci set usque.warp0.default_route=1; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  local i=0
+  while [ "$i" -lt 30 ]; do rt "ip route show default | grep -q ' dev warp0'" && break; sleep 1; i=$((i+1)); done
+  MID=$(rt 'ip -4 route show default; echo ===rule; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===routeget; ip route get 104.16.132.229 | head -1; echo ===trace; curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+  show "$MID"
+  echo "$MID" | grep -q 'dev warp0' && { ok "v4 default via warp0 installed"; record "optin: v4 default via warp0"; } || { bad "v4 default not via warp0"; record "optin: v4 default via warp0"; }
+  echo "$MID" | sed -n '/===rule/,/===routeget/p' | grep -q '^1000:' && { ok "priority-1000 v4 rule installed"; record "optin: policy rule installed"; } || { bad "no priority-1000 rule"; record "optin: policy rule installed"; }
+  echo "$MID" | grep -q 'warp=on' && { ok "egress warp=on with opt-in routing"; record "optin: egress warp=on"; } || { bad "egress not warp=on"; record "optin: egress warp=on"; }
+  log "9b. revert (default_route=0 + restart) and verify exact restore"
+  rt 'uci set usque.warp0.default_route=0; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  sleep 6
+  POST=$(rt 'ip -4 route show default; echo ===v6; ip -6 route show default; echo ===rule; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===trace; curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+  show "$POST"
+  echo "$POST" | head -1 | grep -q 'default via .*dev phy0-tether' && { ok "WAN v4 default restored exactly"; record "optin: WAN default restored"; } || { bad "WAN v4 default NOT restored"; record "optin: WAN default restored"; }
+  echo "$POST" | sed -n '/===rule/,/===trace/p' | grep -q '^1000:' && { bad "policy rule left behind after revert"; record "optin: no leftover rule"; } || { ok "no leftover policy rule"; record "optin: no leftover rule"; }
+  echo "$POST" | grep -q 'warp=off' && { ok "egress restored to WAN (warp=off)"; record "optin: egress restored"; } || { bad "egress still via tunnel"; record "optin: egress restored"; }
+}
+
+step_ipv6() {
+  log "10. IPv6 routing (ipv6_route=auto on v4-only WAN)"
+  rt 'uci set usque.warp0.default_route=0; uci set usque.warp0.ipv6=1; uci set usque.warp0.ipv6_route=auto; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  local i=0
+  while [ "$i" -lt 30 ]; do rt "ip -6 route show default | grep -q ' dev warp0'" && break; sleep 1; i=$((i+1)); done
+  V6=$(rt 'ip -6 route show default; echo ===rule6; ip -6 rule show | grep -E "^1000:.*lookup main" || echo none; echo ===addrs; ip -6 addr show dev warp0 | grep inet6; echo ===trace6; curl -6 -m 20 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp|colo)="; echo ===ping6; ping -6 -c 2 -W 5 2606:4700:4700::1111 2>&1 | tail -2')
+  show "$V6"
+  echo "$V6" | grep -q 'dev warp0' && { ok "IPv6 default via warp0 (auto)"; record "ipv6: default route installed"; } || { bad "no IPv6 default via warp0"; record "ipv6: default route installed"; }
+  echo "$V6" | sed -n '/===rule6/,/===addrs/p' | grep -q '^1000:' && { ok "IPv6 priority-1000 rule installed"; record "ipv6: policy rule installed"; } || { bad "no IPv6 policy rule"; record "ipv6: policy rule installed"; }
+  echo "$V6" | grep -q 'warp=on' && { ok "curl -6 through tunnel: warp=on"; record "ipv6: curl -6 warp=on"; } || { bad "curl -6 not warp=on"; record "ipv6: curl -6 warp=on"; }
+  echo "$V6" | grep -q '0% packet loss' && { ok "ping -6 through tunnel works"; record "ipv6: ping -6"; } || info "ping -6 0% loss not observed"
+  log "10b. revert to ipv6_route=off and verify v6 untouched"
+  rt 'uci set usque.warp0.ipv6_route=off; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1; sleep 6
+  V6OFF=$(rt 'ip -6 route show default; ip -6 rule show | grep -E "^1000:" || echo none')
+  show "$V6OFF"
+  echo "$V6OFF" | grep -q 'dev warp0' && { bad "v6 default left with ipv6_route=off"; record "ipv6: off leaves v6 untouched"; } || { ok "no v6 default with ipv6_route=off"; record "ipv6: off leaves v6 untouched"; }
+  rt 'uci set usque.warp0.ipv6_route=auto; uci commit usque' >/dev/null 2>&1
+}
+
+step_lanipv6() {
+  log "11. LAN IPv6 / NAT66 (lan_ipv6=1)"
+  PRE=$(rt 'cat /proc/sys/net/ipv6/conf/all/forwarding; ip -6 addr show br-lan | grep inet6; nft list ruleset | grep -c masq6 || true')
+  show "$PRE"
+  rt 'uci set settings.lan_ipv6=1; uci set settings.lan_ipv6_prefix=""; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  sleep 8
+  MID=$(rt 'ip -6 addr show br-lan | grep inet6; echo ===nat66; nft list ruleset | grep -iE "masq6|nat66|usque" | head -10; echo ===ra; ps w | grep -c "[o]dhcpd"; echo ===default; ip -6 route show default')
+  show "$MID"
+  echo "$MID" | grep -q 'masq6\|masq' && { ok "NAT66/masq6 rules present"; record "lan_ipv6: NAT66 configured"; } || info "no masq6 rule visible"
+  MACV6=$(ifconfig en0 2>/dev/null | awk '/inet6 fd85/{print $2}' | head -1)
+  info "Mac ULA: ${MACV6:-none}"
+  if [ -n "$MACV6" ]; then
+    MTRACE=$(curl -6 -m 20 -s https://www.cloudflare.com/cdn-cgi/trace 2>&1); show "$MTRACE"
+    echo "$MTRACE" | grep -q 'warp=on' && { ok "Mac LAN IPv6 through router/WARP (NAT66) works"; record "lan_ipv6: Mac curl -6 warp=on"; } || { bad "Mac LAN IPv6 test failed"; record "lan_ipv6: Mac curl -6 warp=on"; }
+  else
+    record "lan_ipv6: Mac curl -6 warp=on" SKIP
+  fi
+  log "11b. revert lan_ipv6=0"
+  rt 'uci set settings.lan_ipv6=0; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1; sleep 6
+  rt 'ip -6 route show default; curl -m 12 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="' | sed 's/^/  | /'
+  record "lan_ipv6: reverted" PASS
+}
+
+step_multi() {
+  log "12. Multi-instance (second section warp1)"
+  rt 'uci -q delete usque.warp1; uci set usque.warp1=usque; uci set usque.warp1.enabled=1; uci set usque.warp1.mode=custom; uci set usque.warp1.config_file=/etc/usque/warp0.json; uci set usque.warp1.interface=warp1; uci set usque.warp1.mtu=1400; uci set usque.warp1.ipv6=0; uci set usque.warp1.default_route=0; uci set usque.warp1.auto_register=0; uci set usque.warp1.sni=""; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  sleep 10
+  M=$(rt 'ip -br link show warp0; ip -br link show warp1 2>&1; echo ===init; ubus call service list "{"name":"usque"}" | head -c 800; echo; echo ===log; logread -e usque | tail -12')
+  show "$M"
+  echo "$M" | grep -q '^warp0' && { ok "warp0 up with second instance"; record "multi: warp0 up"; } || { bad "warp0 down with second instance"; record "multi: warp0 up"; }
+  echo "$M" | grep -q '^warp1' && { ok "warp1 up (second instance)"; record "multi: warp1 up"; } || { bad "warp1 not up"; record "multi: warp1 up"; }
+  rt '/etc/init.d/usque stop >/dev/null 2>&1; uci -q delete usque.warp1; uci commit usque; /etc/init.d/usque start' >/dev/null 2>&1
+  sleep 6
+  record "multi: second instance removed" PASS
+}
+
+step_custom() {
+  log "13. Custom mode section (fixture: existing Cloudflare config, custom port/iface)"
+  rt 'uci -q delete usque.custom0; uci set usque.custom0=usque; uci set usque.custom0.enabled=1; uci set usque.custom0.mode=custom; uci set usque.custom0.config_file=/etc/usque/warp0.json; uci set usque.custom0.interface=warp2; uci set usque.custom0.mtu=1400; uci set usque.custom0.endpoint_port=443; uci set usque.custom0.endpoint_ipv6=0; uci set usque.custom0.ipv6=0; uci set usque.custom0.default_route=0; uci set usque.custom0.auto_register=0; uci set usque.custom0.sni="consumer-masque.cloudflareclient.com"; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
+  sleep 10
+  C=$(rt 'ip -br link show warp2 2>&1; echo ===log; logread -e usque | tail -10')
+  show "$C"
+  echo "$C" | grep -q '^warp2' && { ok "custom-mode instance up"; record "custom: instance up"; } || { bad "custom-mode instance not up"; record "custom: instance up"; }
+  rt '/etc/init.d/usque stop >/dev/null 2>&1; uci -q delete usque.custom0; uci commit usque; /etc/init.d/usque start' >/dev/null 2>&1
+  sleep 6
+  record "custom: section removed" PASS
+}
+
 case "$STEP" in
   backup)    step_backup ;;
   stale)     step_stale ;;
@@ -365,6 +466,11 @@ case "$STEP" in
   luci)      step_luci ;;
   reboot)    step_reboot ;;
   uninstall) step_uninstall ;;
+  optin)     step_optin ;;
+  ipv6)      step_ipv6 ;;
+  lanipv6)   step_lanipv6 ;;
+  multi)     step_multi ;;
+  custom)    step_custom ;;
   final)     step_final ;;
   all)       step_backup && step_stale && step_feed && step_service && step_luci; stop_feed_http ;;
   *) sed -n '2,30p' "$0"; exit 1 ;;
