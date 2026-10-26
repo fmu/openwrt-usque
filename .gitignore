@@ -17,3 +17,6 @@ usque-rs
 
 # local rust toolchain
 /.rust/
+
+# local caches
+/.cache/
