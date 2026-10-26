@@ -847,6 +847,18 @@ function rpcMethodsSince(index) {
 		const r2 = await v2.render(data);
 		assert(isEl(r2), 'page renders');
 		assert(/No connections configured/.test(textOf(r2)), 'hint shown');
+		assert(/Backend error/.test(textOf(r2)), 'backend error banner shown');
+	});
+
+	await t('account panel refreshes when the config state changes', function() {
+		v.updateStatus(makeStatus([ conn({ config_exists: false, config_valid: false }) ]));
+		v.acctSel.value = 'main';
+		v.updateAccountSection();
+		assert(/No WARP configuration yet/.test(textOf(v.acctBody)), 'no-config panel');
+		v.updateStatus(makeStatus([ conn({ config_exists: true, config_valid: true, device_id: 'dev-2' }) ]));
+		v.updateAccountSection();
+		assert(/WARP device ID/.test(textOf(v.acctBody)), 'summary panel after config appeared');
+		assert(/dev-2/.test(textOf(v.acctBody)), 'new device id shown');
 	});
 
 	await t('renders when /etc/config/usque cannot be read', async function() {

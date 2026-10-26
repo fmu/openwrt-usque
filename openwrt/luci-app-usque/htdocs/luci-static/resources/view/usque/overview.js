@@ -189,6 +189,7 @@ return view.extend({
 	 * ------------------------------------------------------------------ */
 
 	renderOverview: function() {
+		this.elBackend = E('div', { 'class': 'alert-message danger', 'style': 'display:none' });
 		this.elService = badge(_('unknown'));
 		this.elServiceNote = E('span', { 'class': 'cbi-value-description' });
 		this.elConnSummary = E('span');
@@ -200,6 +201,7 @@ return view.extend({
 			E('h2', {}, _('usque (Cloudflare WARP)')),
 			E('div', { 'class': 'cbi-map-descr' },
 				_('MASQUE/Connect-IP tunnels. Connections and their routing behaviour are configured below; this page never takes over the default route unless you explicitly enable it.')),
+			this.elBackend,
 			valueRow(_('Service'), [ this.elService, ' ', this.elServiceNote ]),
 			valueRow(_('Connections'), [ this.elConnSummary, ' ', this.elRouteState ]),
 			valueRow(_('LAN IPv6'), [ this.elLanV6 ]),
@@ -212,6 +214,14 @@ return view.extend({
 		var conns = st.connections || [];
 		var service = st.service || {};
 		var globals = st.globals || {};
+
+		if (st.ok !== true) {
+			this.elBackend.style.display = '';
+			this.elBackend.textContent = _('Backend error: %s').format(errText(st));
+		}
+		else {
+			this.elBackend.style.display = 'none';
+		}
 		var enabled = 0, running = 0, defaultRouted = [], missingCfg = [], lanV6Conns = [];
 
 		conns.forEach(function(c) {
@@ -686,10 +696,17 @@ return view.extend({
 		}
 
 		var sid = this.acctSel.value;
-		if (!sid || (this.accountSectionFor === sid && !this.accountNeedsUpdate))
+		var conn = sid ? this.connBySection(sid) : null;
+		var sig = conn
+			? [ sid, conn.config_exists, conn.config_valid, conn.config_secure,
+			    conn.config_mode, conn.device_id, conn.mode ].join('|')
+			: '';
+
+		if (!sid || (this.accountSectionFor === sid && this.accountSig === sig && !this.accountNeedsUpdate))
 			return;
 
 		this.accountSectionFor = sid;
+		this.accountSig = sig;
 		this.accountNeedsUpdate = false;
 		this.renderAccountPanel(sid);
 	},
