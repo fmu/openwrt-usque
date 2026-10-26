@@ -182,8 +182,6 @@ CFG_V4=''
 CFG_V6=''
 CFG_EP4=''
 CFG_EP6=''
-CFG_EPH2_4=''
-CFG_EPH2_6=''
 CFG_MODE=''
 CFG_SIZE=0
 
@@ -192,7 +190,7 @@ load_config() {
 
 	CFG_OK=0
 	CFG_ID=''; CFG_V4=''; CFG_V6=''
-	CFG_EP4=''; CFG_EP6=''; CFG_EPH2_4=''; CFG_EPH2_6=''
+	CFG_EP4=''; CFG_EP6=''
 
 	[ -n "$f" ] && [ -f "$f" ] && [ -s "$f" ] || return 1
 	# validate the JSON before eval'ing jshn output
@@ -204,8 +202,6 @@ load_config() {
 	json_get_var CFG_V6 ipv6
 	json_get_var CFG_EP4 endpoint_v4
 	json_get_var CFG_EP6 endpoint_v6
-	json_get_var CFG_EPH2_4 endpoint_h2_v4
-	json_get_var CFG_EPH2_6 endpoint_h2_v6
 	json_cleanup
 	CFG_OK=1
 	return 0
@@ -220,6 +216,7 @@ config_mode() {
 config_size() {
 	local sz
 
+	[ -f "$1" ] || { printf '0'; return; }
 	sz="$(wc -c < "$1" 2>/dev/null | tr -d ' ')"
 	case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
 	printf '%s' "$sz"
@@ -250,8 +247,6 @@ add_config_object() {
 	json_add_str ipv6 "$CFG_V6"
 	json_add_str endpoint_v4 "$CFG_EP4"
 	json_add_str endpoint_v6 "$CFG_EP6"
-	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
-	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
 	json_add_str mode "$CFG_MODE"
 	json_add_int size "$CFG_SIZE"
 	json_close_object
@@ -305,8 +300,6 @@ do_status() {
 	json_add_str warp_ipv6 "$CFG_V6"
 	json_add_str endpoint_v4 "$CFG_EP4"
 	json_add_str endpoint_v6 "$CFG_EP6"
-	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
-	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
 	json_add_str mtu "${mtu:-}"
 	json_dump
 	json_cleanup
@@ -335,8 +328,6 @@ do_get_config() {
 	json_add_str ipv6 "$CFG_V6"
 	json_add_str endpoint_v4 "$CFG_EP4"
 	json_add_str endpoint_v6 "$CFG_EP6"
-	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
-	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
 	json_dump
 	json_cleanup
 }
