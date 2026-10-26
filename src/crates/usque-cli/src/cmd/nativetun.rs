@@ -5,6 +5,7 @@ use clap::Args;
 use usque_tun_platform::{NativeTun, NativeTunConfig};
 use usque_tunnel_core::{HookEnv, MaintainTunnelConfig, TunnelSupervisor};
 
+use crate::cmd::register::{auto_register_if_missing, RegisterOptions};
 use crate::runtime::{build_connect_options, load_config, TunnelFlags};
 
 #[derive(Debug, Args)]
@@ -17,9 +18,15 @@ pub struct NativeTunArgs {
     pub interface_name: String,
     #[arg(long = "persist")]
     pub persist: bool,
+    /// Register a new client if the config file does not exist yet.
+    #[arg(long = "auto-register")]
+    pub auto_register: bool,
 }
 
 pub async fn run(args: NativeTunArgs, config_path: &str) -> Result<()> {
+    if args.auto_register {
+        auto_register_if_missing(RegisterOptions::auto_register_defaults(), config_path).await?;
+    }
     let config = load_config(config_path)?;
     let (v4, v6) = crate::runtime::tunnel_addresses(&config, &args.tunnel);
 

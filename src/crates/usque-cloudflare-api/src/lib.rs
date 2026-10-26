@@ -1,4 +1,5 @@
 mod client;
+mod http;
 mod models;
 
 pub use client::{enroll_key, register, ApiError, CloudflareClient};

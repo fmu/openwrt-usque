@@ -40,10 +40,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: package-${{ github.ref }}
+  # Real builds and packaging smoke tests must not cancel each other: other
+  # teammates push to main frequently while a smoke test is running.
+  group: package-${{ github.ref }}-${{ inputs.dummy_binary && 'dummy' || 'real' }}
   cancel-in-progress: true
 
 env:
+  ZIG_VERSION: "0.17.0"
+  ZIG_SHA256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
   SDK_VERSION: "25.12.6"
   SDK_URL: "https://downloads.openwrt.org/releases/25.12.6/targets/ipq40xx/generic/openwrt-sdk-25.12.6-ipq40xx-generic_gcc-14.3.0_musl_eabi.Linux-x86_64.tar.zst"
   ARCH: arm_cortex-a7_neon-vfpv4
@@ -66,6 +70,7 @@ jobs:
   package:
     name: Build packages + signed feed
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -74,8 +79,46 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential zstd rsync file curl
 
-      - name: Build usque binary (armv7 musl)
+      - name: Install Rust target (armv7 musl)
         if: ${{ !inputs.dummy_binary }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+
+      - name: Install zig (musl cross libc + linker)
+        if: ${{ !inputs.dummy_binary }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig/zig" version
+
+      - name: Install cargo-zigbuild
+        if: ${{ !inputs.dummy_binary }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Cache cargo registry and target
+        if: ${{ !inputs.dummy_binary }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: usque-armv7-${{ hashFiles('src/Cargo.lock', 'src/Cargo.toml', 'src/crates/**/Cargo.toml') }}
+          restore-keys: |
+            usque-armv7-
+
+      - name: Build usque binary (armv7 musl, QUIC only)
+        if: ${{ !inputs.dummy_binary }}
+        env:
+          FEATURES: quinn
         run: |
           set -euo pipefail
           if [ ! -x build/build-usque.sh ]; then
@@ -85,6 +128,7 @@ jobs:
           ./build/build-usque.sh
           ls -l dist/usque
           file dist/usque
+          sha256sum dist/usque
 
       - name: Create placeholder binary (packaging smoke test)
         if: ${{ inputs.dummy_binary }}

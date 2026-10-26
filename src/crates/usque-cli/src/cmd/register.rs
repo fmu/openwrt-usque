@@ -1,6 +1,6 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Args;
 use usque_cloudflare_api::{self, CloudflareClient};
@@ -19,6 +19,12 @@ pub struct RegisterArgs {
     pub jwt: Option<String>,
     #[arg(short = 'a', long = "accept-tos")]
     pub accept_tos: bool,
+    /// Overwrite an existing config without asking for confirmation.
+    #[arg(long)]
+    pub force: bool,
+    /// Print a machine-readable JSON summary of the created config.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,11 +67,12 @@ pub async fn auto_register_if_missing(opts: RegisterOptions, config_path: &str) 
         return Ok(());
     }
     tracing::info!("No config found; registering a new client...");
-    perform_register(&opts, config_path).await
+    perform_register(&opts, config_path).await?;
+    Ok(())
 }
 
-pub async fn perform_register(opts: &RegisterOptions, config_path: &str) -> Result<()> {
-    let client = CloudflareClient::new();
+pub async fn perform_register(opts: &RegisterOptions, config_path: &str) -> Result<Config> {
+    let client = CloudflareClient::new()?;
     let account = usque_cloudflare_api::register(
         &client,
         &opts.model,
@@ -95,6 +102,8 @@ pub async fn perform_register(opts: &RegisterOptions, config_path: &str) -> Resu
         .ok_or_else(|| anyhow::anyhow!("missing peer in registration response"))?;
 
     let cfg = Config {
+        // Stored as PKCS#8 v1 (the format `ring` needs). Legacy Go configs
+        // store SEC1 instead; `usque_crypto::decode_private_key` reads both.
         private_key: STANDARD.encode(priv_key),
         endpoint_v4: parse_endpoint_v4(&peer.endpoint.v4),
         endpoint_v6: parse_endpoint_v6(&peer.endpoint.v6),
@@ -110,11 +119,15 @@ pub async fn perform_register(opts: &RegisterOptions, config_path: &str) -> Resu
 
     cfg.save(config_path)?;
     tracing::info!("Config saved to {config_path}");
-    Ok(())
+    Ok(cfg)
 }
 
 pub async fn run(args: RegisterArgs, config_path: &str) -> Result<()> {
-    if Config::load(config_path).is_ok() {
+    if !args.force && Config::load(config_path).is_ok() {
+        // Never block a non-interactive caller (LuCI/uci/hotplug) on stdin.
+        if !io::stdin().is_terminal() {
+            bail!("config {config_path} already exists; pass --force to overwrite it");
+        }
         print!("You already have a config. Do you want to overwrite it? (y/n) ");
         io::stdout().flush()?;
         let mut line = String::new();
@@ -124,5 +137,21 @@ pub async fn run(args: RegisterArgs, config_path: &str) -> Result<()> {
         }
     }
 
-    perform_register(&args.into(), config_path).await
+    let json = args.json;
+    let cfg = perform_register(&args.into(), config_path).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "config": config_path,
+                "id": cfg.id,
+                "ipv4": cfg.ipv4,
+                "ipv6": cfg.ipv6,
+                "endpoint_v4": cfg.endpoint_v4,
+                "endpoint_v6": cfg.endpoint_v6,
+            })
+        );
+    }
+    Ok(())
 }

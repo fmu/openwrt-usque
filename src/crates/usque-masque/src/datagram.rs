@@ -75,17 +75,6 @@ pub fn decode_h3_datagram_payload_owned(data: &Bytes) -> Option<Bytes> {
     Some(payload)
 }
 
-/// Wrap an IP packet for HTTP/2 CONNECT-IP (DATAGRAM capsule type 0).
-/// Assumes the caller has already decremented the IP TTL/hop-limit.
-/// Generic over `BufMut`; see [`encode_h3_datagram_payload_into`].
-pub fn encode_h2_datagram_capsule_into(
-    packet: &[u8],
-    out: &mut impl BufMut,
-) -> anyhow::Result<()> {
-    crate::capsule::put_capsule(out, CAPSULE_CONNECT_IP_DATA, packet);
-    Ok(())
-}
-
 fn decode_varint_local(data: &Bytes) -> Option<(u64, usize)> {
     let first = *data.first()?;
     let len = 1usize << (first >> 6);

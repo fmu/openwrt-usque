@@ -1,0 +1,95 @@
+name: Build usque (armv7 musl)
+
+# Builds the static, stripped `usque` binary for OpenWrt 25.12 ipq40xx
+# (arm_cortex-a7_neon-vfpv4, musl) and uploads it as the `usque-armv7-musl`
+# artifact. `build/build-usque.sh` is the single source of truth; it is also
+# called by the packaging workflow.
+on:
+  push:
+    paths:
+      - "src/**"
+      - "build/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-usque-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.17.0"
+  ZIG_SHA256: "1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026"
+  TARGET: armv7-unknown-linux-musleabihf
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: armv7-unknown-linux-musleabihf
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: armv7-unknown-linux-musleabihf
+
+      - name: Install zig (musl cross libc + linker)
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          mkdir -p "$RUNNER_TEMP/zig"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "${ZIG_SHA256}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/zig/zig" version
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: usque-armv7-${{ hashFiles('src/Cargo.lock', 'src/Cargo.toml', 'src/crates/**/Cargo.toml') }}
+          restore-keys: |
+            usque-armv7-
+
+      - name: Build, strip, size check
+        run: build/build-usque.sh
+
+      - name: Report artifact
+        run: |
+          set -euo pipefail
+          size=$(wc -c < dist/usque | tr -d ' ')
+          sha=$(sha256sum dist/usque | cut -d' ' -f1)
+          {
+            echo "### usque armv7 musl"
+            echo
+            echo '```'
+            file dist/usque
+            echo '```'
+            echo
+            echo "| size | sha256 |"
+            echo "| --- | --- |"
+            echo "| ${size} bytes | \`${sha}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          test -f dist/usque
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: usque-armv7-musl
+          path: dist/usque
+          if-no-files-found: error

@@ -52,102 +52,57 @@ mod tests {
                 assert_eq!(args.locale, "en_US");
                 assert_eq!(args.model, "PC");
                 assert_eq!(args.name.as_deref(), Some("dev"));
+                assert!(!args.force);
+                assert!(!args.json);
+            }
+            _ => panic!("expected register"),
+        }
+    }
+
+    /// The LuCI contract: `usque --config FILE register --accept-tos --force -n NAME`.
+    #[test]
+    fn parse_register_non_interactive_contract() {
+        let cli = Cli::parse_from_args([
+            "usque",
+            "--config",
+            "/etc/usque/config.json",
+            "register",
+            "--accept-tos",
+            "--force",
+            "-n",
+            "router",
+        ])
+        .unwrap();
+        assert_eq!(cli.config, "/etc/usque/config.json");
+        match cli.command {
+            crate::cmd::Commands::Register(args) => {
+                assert!(args.accept_tos);
+                assert!(args.force);
+                assert_eq!(args.name.as_deref(), Some("router"));
             }
             _ => panic!("expected register"),
         }
     }
 
     #[test]
+    fn parse_register_json_flag() {
+        let cli = Cli::parse_from_args(["usque", "register", "--accept-tos", "--json"]).unwrap();
+        match cli.command {
+            crate::cmd::Commands::Register(args) => assert!(args.json),
+            _ => panic!("expected register"),
+        }
+    }
+
+    #[test]
     fn parse_enroll_flags() {
-        let cli = Cli::parse_from_args(["usque", "enroll", "-n", "phone", "-r"]).unwrap();
+        let cli = Cli::parse_from_args(["usque", "enroll", "-n", "phone", "-r", "--json"]).unwrap();
         match cli.command {
             crate::cmd::Commands::Enroll(args) => {
                 assert_eq!(args.name.as_deref(), Some("phone"));
                 assert!(args.regen_key);
+                assert!(args.json);
             }
             _ => panic!("expected enroll"),
-        }
-    }
-
-    #[test]
-    fn parse_socks_flags() {
-        let cli = Cli::parse_from_args([
-            "usque",
-            "socks",
-            "--auto-register",
-            "-b",
-            "127.0.0.1",
-            "-p",
-            "1080",
-            "-u",
-            "user",
-            "-w",
-            "pass",
-            "-d",
-            "1.1.1.1",
-            "-t",
-            "3s",
-            "-l",
-            "-6",
-            "-P",
-            "8443",
-        ])
-        .unwrap();
-        match cli.command {
-            crate::cmd::Commands::Socks(args) => {
-                assert!(args.auto_register);
-                assert_eq!(args.bind, "127.0.0.1");
-                assert_eq!(args.port, 1080);
-                assert_eq!(args.username.as_deref(), Some("user"));
-                assert_eq!(args.password.as_deref(), Some("pass"));
-                assert_eq!(args.dns, vec!["1.1.1.1"]);
-                assert!(args.local_dns);
-                assert!(args.tunnel.ipv6);
-                assert_eq!(args.tunnel.connect_port, 8443);
-            }
-            _ => panic!("expected socks"),
-        }
-    }
-
-    #[test]
-    fn parse_http_proxy_flags() {
-        let cli = Cli::parse_from_args([
-            "usque",
-            "http-proxy",
-            "--auto-register",
-            "-p",
-            "8080",
-            "-w",
-            "secret",
-        ])
-        .unwrap();
-        match cli.command {
-            crate::cmd::Commands::HttpProxy(args) => {
-                assert!(args.auto_register);
-                assert_eq!(args.port, 8080);
-                assert_eq!(args.password.as_deref(), Some("secret"));
-            }
-            _ => panic!("expected http-proxy"),
-        }
-    }
-
-    #[test]
-    fn parse_portfw_flags() {
-        let cli = Cli::parse_from_args([
-            "usque",
-            "port-fw",
-            "-L",
-            "8080:127.0.0.1:80",
-            "-R",
-            "9090:example.com:443",
-        ])
-        .unwrap();
-        match cli.command {
-            crate::cmd::Commands::PortFw(args) => {
-                assert_eq!(args.local_ports, vec!["8080:127.0.0.1:80"]);
-                assert_eq!(args.remote_ports, vec!["9090:example.com:443"]);
-            }
-            _ => panic!("expected port-fw"),
         }
     }
 
@@ -160,8 +115,49 @@ mod tests {
                 assert_eq!(args.interface_name, "usque0");
                 assert!(args.no_iproute2);
                 assert!(args.persist);
+                assert!(!args.auto_register);
+                assert_eq!(args.tunnel.mtu, crate::runtime::DEFAULT_TUNNEL_MTU);
             }
             _ => panic!("expected native-tun"),
+        }
+    }
+
+    #[test]
+    fn parse_nativetun_auto_register_and_tunnel_flags() {
+        let cli = Cli::parse_from_args([
+            "usque",
+            "--config",
+            "/tmp/warp.json",
+            "native-tun",
+            "--auto-register",
+            "-n",
+            "usque0",
+            "-6",
+            "-P",
+            "8443",
+            "-m",
+            "1280",
+        ])
+        .unwrap();
+        assert_eq!(cli.config, "/tmp/warp.json");
+        match cli.command {
+            crate::cmd::Commands::NativeTun(args) => {
+                assert!(args.auto_register);
+                assert!(args.tunnel.ipv6);
+                assert_eq!(args.tunnel.connect_port, 8443);
+                assert_eq!(args.tunnel.mtu, 1280);
+            }
+            _ => panic!("expected native-tun"),
+        }
+    }
+
+    #[test]
+    fn removed_proxy_subcommands_are_gone() {
+        for removed in ["socks", "http-proxy", "port-fw"] {
+            assert!(
+                Cli::parse_from_args(["usque", removed]).is_err(),
+                "{removed} must no longer be a subcommand"
+            );
         }
     }
 

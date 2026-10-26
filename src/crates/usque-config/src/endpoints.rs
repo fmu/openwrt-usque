@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use anyhow::{bail, Result};
 
-use crate::{Config, HTTP2_WIKI_URL};
+use crate::Config;
 
 pub const DEFAULT_ENDPOINT_H2_V4: &str = "162.159.198.2";
 
@@ -14,45 +14,12 @@ pub enum EndpointSelection {
     Http2V6,
 }
 
-pub fn select_endpoint(
-    config: &Config,
-    use_http2: bool,
-    use_ipv6: bool,
-    port: u16,
-) -> Result<SocketAddr> {
-    if use_http2 {
-        if use_ipv6 {
-            if config.endpoint_h2_v6.is_empty() {
-                bail!(
-                    "--http2 with --ipv6 requires config endpoint_h2_v6 to be set; see {HTTP2_WIKI_URL}"
-                );
-            }
-            let ip: IpAddr = config.endpoint_h2_v6.parse().map_err(|_| {
-                anyhow::anyhow!("invalid endpoint_h2_v6 value {:?}", config.endpoint_h2_v6)
-            })?;
-            return Ok(match ip {
-                IpAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(v4, port)),
-                IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, port, 0, 0)),
-            });
-        }
-
-        let v4 = if config.endpoint_h2_v4.is_empty() {
-            DEFAULT_ENDPOINT_H2_V4
-        } else {
-            &config.endpoint_h2_v4
-        };
-        let ip: IpAddr = v4
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid endpoint_h2_v4 value {v4:?}"))?;
-        return Ok(SocketAddr::V4(SocketAddrV4::new(
-            match ip {
-                IpAddr::V4(v4) => v4,
-                _ => bail!("endpoint_h2_v4 must be IPv4"),
-            },
-            port,
-        )));
-    }
-
+/// Pick the MASQUE (HTTP/3, UDP/443) endpoint from a Go-compatible config.
+///
+/// The HTTP/2 fallback of upstream usque-rs was dropped (see
+/// `usque-masque::connect_tunnel`), so `endpoint_h2_*` in the config is kept
+/// only for file-format compatibility and ignored here.
+pub fn select_endpoint(config: &Config, use_ipv6: bool, port: u16) -> Result<SocketAddr> {
     if use_ipv6 {
         let ip: IpAddr = config
             .endpoint_v6
@@ -101,7 +68,7 @@ mod endpoint_tests {
     #[test]
     fn select_http3_ipv4() {
         let cfg = sample_config();
-        let addr = select_endpoint(&cfg, false, false, 443).unwrap();
+        let addr = select_endpoint(&cfg, false, 443).unwrap();
         assert_eq!(
             addr,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(162, 159, 198, 1), 443))
@@ -111,7 +78,7 @@ mod endpoint_tests {
     #[test]
     fn select_http3_ipv6() {
         let cfg = sample_config();
-        let addr = select_endpoint(&cfg, false, true, 443).unwrap();
+        let addr = select_endpoint(&cfg, true, 443).unwrap();
         assert_eq!(
             addr,
             SocketAddr::V6(SocketAddrV6::new(
@@ -123,20 +90,4 @@ mod endpoint_tests {
         );
     }
 
-    #[test]
-    fn select_http2_default_ipv4() {
-        let cfg = sample_config();
-        let addr = select_endpoint(&cfg, true, false, 443).unwrap();
-        assert_eq!(
-            addr,
-            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(162, 159, 198, 2), 443))
-        );
-    }
-
-    #[test]
-    fn select_http2_ipv6_requires_config() {
-        let mut cfg = sample_config();
-        cfg.endpoint_h2_v6.clear();
-        assert!(select_endpoint(&cfg, true, true, 443).is_err());
-    }
 }

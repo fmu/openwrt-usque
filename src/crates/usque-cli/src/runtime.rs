@@ -1,14 +1,13 @@
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use tokio::sync::Notify;
 use usque_config::Config;
-use usque_tunnel_core::{HookEnv, MaintainTunnelConfig, TunnelSupervisor};
-use usque_virtual_net::{ChannelDevice, VirtualStack};
-
-use crate::runtime::tunnel::build_connect_options;
+use usque_crypto::{
+    build_rustls_config, decode_endpoint_public_key, decode_private_key, TlsOptions,
+};
+use usque_masque::ConnectOptions;
 
 /// Default tunnel MTU: the largest value empirically measured to fit
 /// inside a single QUIC DATAGRAM against Cloudflare WARP. The QUIC
@@ -44,8 +43,6 @@ pub struct TunnelFlags {
     pub reconnect_delay: humantime::Duration,
     #[arg(long = "always-reconnect")]
     pub always_reconnect: bool,
-    #[arg(long = "http2")]
-    pub http2: bool,
     #[arg(long = "insecure")]
     pub insecure: bool,
     #[arg(long = "on-connect", default_value = "")]
@@ -57,9 +54,6 @@ pub struct TunnelFlags {
 pub fn load_config(path: &str) -> Result<Config> {
     Config::load(path).with_context(|| format!("config file not found at {path}"))
 }
-
-pub type UserspaceTunnelHandle = tokio::task::JoinHandle<()>;
-pub type UserspaceTunnelSpawn = (Arc<VirtualStack>, Arc<ChannelDevice>, UserspaceTunnelHandle);
 
 pub fn tunnel_addresses(cfg: &Config, flags: &TunnelFlags) -> (Option<IpAddr>, Option<IpAddr>) {
     let v4 = if flags.no_tunnel_ipv4 {
@@ -75,46 +69,35 @@ pub fn tunnel_addresses(cfg: &Config, flags: &TunnelFlags) -> (Option<IpAddr>, O
     (v4, v6)
 }
 
-pub fn spawn_userspace_tunnel(
-    config: &Config,
-    flags: &TunnelFlags,
-    mode: &str,
-) -> Result<UserspaceTunnelSpawn> {
-    let (v4, v6) = tunnel_addresses(config, flags);
-    let (device, to_device, from_device) = ChannelDevice::pair();
-    let device = Arc::new(device);
+pub fn build_connect_options(config: &Config, flags: &TunnelFlags) -> Result<ConnectOptions> {
+    let signing_key = decode_private_key(&config.private_key)?;
+    let peer_key = decode_endpoint_public_key(&config.endpoint_pub_key)?;
 
-    let activity = Arc::new(Notify::new());
-    let stack = Arc::new(VirtualStack::start(
-        v4,
-        v6,
-        flags.mtu,
-        from_device,
-        to_device,
-        Arc::clone(&activity),
-    ));
+    let alpn = vec![b"h3".to_vec()];
 
-    let connect = build_connect_options(config, flags)?;
-    let hook_env = HookEnv::default()
-        .with("USQUE_MODE", mode)
-        .with("USQUE_IPV4", &config.ipv4)
-        .with("USQUE_IPV6", &config.ipv6);
+    let tls_config = build_rustls_config(
+        &signing_key,
+        TlsOptions {
+            sni: flags.sni_address.clone(),
+            insecure: flags.insecure,
+            peer_public_key: peer_key.clone(),
+            alpn,
+        },
+    )?;
 
-    let maintain_cfg = MaintainTunnelConfig {
-        connect,
-        mtu: flags.mtu,
-        reconnect_delay: flags.reconnect_delay.into(),
-        always_reconnect: flags.always_reconnect,
-        on_connect: flags.on_connect.clone(),
-        on_disconnect: flags.on_disconnect.clone(),
-        hook_env,
-        activity: Some(activity),
-    };
+    let endpoint = usque_config::select_endpoint(config, flags.ipv6, flags.connect_port)?;
 
-    let device_for_tunnel = Arc::clone(&device);
-    let handle = tokio::spawn(async move {
-        TunnelSupervisor::maintain(maintain_cfg, device_for_tunnel).await;
-    });
-
-    Ok((stack, device, handle))
+    if flags.insecure {
+        tracing::warn!("WARNING: --insecure is set, endpoint certificate pinning is disabled");
+    }
+    Ok(ConnectOptions {
+        tls_config,
+        insecure: flags.insecure,
+        peer_public_key: peer_key,
+        endpoint,
+        sni: flags.sni_address.clone(),
+        keepalive_period: Duration::from(flags.keepalive_period),
+        initial_packet_size: flags.initial_packet_size,
+        connect_uri: usque_cloudflare_api::CONNECT_URI.to_string(),
+    })
 }

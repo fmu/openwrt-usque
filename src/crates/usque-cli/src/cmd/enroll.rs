@@ -1,6 +1,6 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use clap::Args;
 use usque_cloudflare_api::{self, CloudflareClient, INVALID_PUBLIC_KEY};
@@ -17,6 +17,9 @@ pub struct EnrollArgs {
     pub name: Option<String>,
     #[arg(short = 'r', long = "regen-key")]
     pub regen_key: bool,
+    /// Print a machine-readable JSON summary of the updated config.
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub async fn run(args: EnrollArgs, config_path: &str) -> Result<()> {
@@ -28,13 +31,10 @@ pub async fn run(args: EnrollArgs, config_path: &str) -> Result<()> {
         generate_ec_keypair()?
     } else {
         let key = decode_private_key(&existing.private_key)?;
-        (
-            private_key_pkcs8_der(&key)?,
-            public_key_spki_der(&key)?,
-        )
+        (private_key_pkcs8_der(&key)?, public_key_spki_der(&key)?)
     };
 
-    let client = CloudflareClient::new();
+    let client = CloudflareClient::new()?;
     let updated = match usque_cloudflare_api::enroll_key(
         &client,
         &existing.id,
@@ -46,6 +46,12 @@ pub async fn run(args: EnrollArgs, config_path: &str) -> Result<()> {
     {
         Ok(data) => data,
         Err(err) if err.body.has_error_message(INVALID_PUBLIC_KEY) => {
+            if !io::stdin().is_terminal() {
+                bail!(
+                    "Cloudflare rejected the public key as invalid; regenerate it with \
+                     `usque enroll --regen-key` (interactive confirmation is unavailable)"
+                );
+            }
             print!("Invalid public key detected. Regenerate key? (y/n): ");
             io::stdout().flush()?;
             let mut line = String::new();
@@ -97,5 +103,19 @@ pub async fn run(args: EnrollArgs, config_path: &str) -> Result<()> {
 
     cfg.save(config_path)?;
     tracing::info!("Config saved to {config_path}");
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "config": config_path,
+                "id": cfg.id,
+                "ipv4": cfg.ipv4,
+                "ipv6": cfg.ipv6,
+                "endpoint_v4": cfg.endpoint_v4,
+                "endpoint_v6": cfg.endpoint_v6,
+            })
+        );
+    }
     Ok(())
 }

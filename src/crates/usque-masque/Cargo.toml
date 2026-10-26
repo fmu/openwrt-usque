@@ -6,23 +6,20 @@ license.workspace = true
 
 [features]
 default = ["quinn"]
+# HTTP/3 (QUIC) transport — the primary MASQUE transport.
 quinn = [
   "dep:quinn",
   "dep:h3",
   "dep:h3-datagram",
   "dep:h3-quinn",
 ]
-quiche = ["dep:boring", "dep:tokio-quiche"]
-
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-boring = {workspace = true, optional = true}
 bytes.workspace = true
 crossfire.workspace = true
 etherparse.workspace = true
 futures-util.workspace = true
-h2.workspace = true
 h3 = {workspace = true, optional = true}
 h3-datagram = {workspace = true, optional = true}
 h3-quinn = {workspace = true, optional = true}
@@ -34,7 +31,6 @@ rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-quiche = {workspace = true, optional = true}
 tokio-rustls.workspace = true
 tracing.workspace = true
 usque-crypto.workspace = true

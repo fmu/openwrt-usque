@@ -1,9 +1,6 @@
 mod capsule;
 mod connect_ip;
 mod datagram;
-mod h2;
-#[cfg(feature = "quiche")]
-mod h3;
 #[cfg(feature = "quinn")]
 mod h3_quinn;
 mod session;
@@ -14,15 +11,15 @@ pub use session::{ConnectOptions, PacketSession, SessionError};
 
 pub use connect_ip::ConnectIpSession;
 pub use datagram::decrement_ttl;
-pub use h2::{connect_h2, connect_h2_on};
 
+/// Open a MASQUE CONNECT-IP session over HTTP/3 (QUIC, UDP/443).
+///
+/// The HTTP/2 (TCP/443) fallback of upstream usque-rs was removed: it pulls in
+/// `h2` + the `hyper`/`tower` HTTP client stack, which the OpenWrt overlay
+/// cannot afford, and the target networks (including the tested iPhone
+/// tethering path) pass UDP/443.
 pub async fn connect_tunnel(options: &ConnectOptions) -> Result<Box<dyn PacketSession>> {
-    if options.use_http2 {
-        let session = h2::connect_h2(options).await?;
-        Ok(Box::new(session))
-    } else {
-        connect_h3(options).await
-    }
+    connect_h3(options).await
 }
 
 #[cfg(feature = "quinn")]
@@ -31,13 +28,7 @@ async fn connect_h3(options: &ConnectOptions) -> Result<Box<dyn PacketSession>> 
     Ok(Box::new(session))
 }
 
-#[cfg(all(not(feature = "quinn"), feature = "quiche"))]
-async fn connect_h3(options: &ConnectOptions) -> Result<Box<dyn PacketSession>> {
-    let session = h3::connect_h3(options).await?;
-    Ok(Box::new(session))
-}
-
-#[cfg(all(not(feature = "quinn"), not(feature = "quiche")))]
+#[cfg(not(feature = "quinn"))]
 async fn connect_h3(_options: &ConnectOptions) -> Result<Box<dyn PacketSession>> {
-    anyhow::bail!("no HTTP/3 QUIC backend enabled (enable `quinn` or `quiche`)")
+    anyhow::bail!("no HTTP/3 QUIC backend enabled (enable the `quinn` feature)")
 }

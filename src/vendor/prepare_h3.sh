@@ -27,10 +27,13 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-SRC="$(ls -d "$HOME"/.cargo/registry/src/*/h3-"$VERSION" 2>/dev/null | head -n1 || true)"
+# Honour CARGO_HOME so the workspace-local toolchain/registry cache works
+# (CI and the developer sandbox both point CARGO_HOME inside the workspace).
+CARGO_HOME_DIR="${CARGO_HOME:-$HOME/.cargo}"
+SRC="$(ls -d "$CARGO_HOME_DIR"/registry/src/*/h3-"$VERSION" 2>/dev/null | head -n1 || true)"
 if [ -z "$SRC" ]; then
     # Not in the registry cache yet (cargo never downloads path-dependencies).
-    REGISTRY_SRC="$HOME"/.cargo/registry/src
+    REGISTRY_SRC="$CARGO_HOME_DIR"/registry/src
     SRC_DIR="$(ls -d "$REGISTRY_SRC"/*/ 2>/dev/null | head -n1 || true)"
     SRC_DIR="${SRC_DIR:-$REGISTRY_SRC/index.crates.io-6f17d22bba15001f}"
     mkdir -p "$SRC_DIR"

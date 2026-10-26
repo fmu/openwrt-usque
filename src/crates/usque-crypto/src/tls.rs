@@ -10,12 +10,16 @@ use crate::keys::{PeerPublicKey, SigningKey};
 
 static CRYPTO_PROVIDER: Once = Once::new();
 
-/// Install the process-wide rustls `aws-lc-rs` backend. Safe to call multiple times.
+/// Install the process-wide rustls `ring` backend. Safe to call multiple times.
+///
+/// `ring` (not `aws-lc-rs`) is used because `aws-lc-rs` cannot be built for
+/// 32-bit ARM, which is the OpenWrt target. All rustls/quinn/rcgen users in
+/// this workspace are configured for the `ring` provider.
 pub fn init() {
     CRYPTO_PROVIDER.call_once(|| {
-        rustls::crypto::aws_lc_rs::default_provider()
+        rustls::crypto::ring::default_provider()
             .install_default()
-            .expect("failed to install rustls aws-lc-rs crypto provider");
+            .expect("failed to install rustls ring crypto provider");
     });
 }
 
@@ -43,11 +47,15 @@ pub fn build_rustls_config(
         })
     };
 
-    let mut config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(cert_chain, private_key)
-        .context("failed to build TLS config")?;
+    let mut config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .context("failed to configure TLS versions")?
+    .dangerous()
+    .with_custom_certificate_verifier(verifier)
+    .with_client_auth_cert(cert_chain, private_key)
+    .context("failed to build TLS config")?;
 
     config.alpn_protocols = options.alpn;
     config.enable_sni = true;
@@ -89,15 +97,14 @@ impl ServerCertVerifier for InsecureVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::RSA_PKCS1_SHA256,
-        ]
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
+/// Pins the MASQUE endpoint by comparing the `SubjectPublicKeyInfo` inside the
+/// server certificate with the key Cloudflare handed out at registration time.
 #[derive(Debug)]
 struct PinnedKeyVerifier {
     expected: PeerPublicKey,
@@ -112,11 +119,11 @@ impl ServerCertVerifier for PinnedKeyVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, RustlsError> {
-        let (_, cert) = x509_parser::parse_x509_certificate(end_entity.as_ref())
-            .map_err(|_| RustlsError::General("failed to parse server certificate".into()))?;
+        let spki = crate::der::certificate_spki_der(end_entity.as_ref()).map_err(|_| {
+            RustlsError::General("failed to parse server certificate".into())
+        })?;
 
-        let spki = cert.public_key();
-        if spki.raw != self.expected.as_der() {
+        if spki != self.expected.as_der() {
             return Err(RustlsError::General(
                 "remote endpoint has a different public key than what we trust in config".into(),
             ));
@@ -153,7 +160,6 @@ impl ServerCertVerifier for PinnedKeyVerifier {
 
 #[cfg(test)]
 mod tests {
-    use aws_lc_rs::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
     use base64::Engine as _;
 
     use super::*;
@@ -161,7 +167,7 @@ mod tests {
     #[test]
     fn init_and_build_config() {
         init();
-        let signing_key = EcdsaKeyPair::generate(&ECDSA_P256_SHA256_FIXED_SIGNING).unwrap();
+        let signing_key = SigningKey::generate().unwrap();
         let peer_der = crate::keys::public_key_spki_der(&signing_key).unwrap();
         let peer_key = crate::keys::decode_endpoint_public_key(&format!(
             "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
@@ -169,7 +175,7 @@ mod tests {
         ))
         .unwrap();
 
-        build_rustls_config(
+        let config = build_rustls_config(
             &signing_key,
             TlsOptions {
                 sni: "example.com".into(),
@@ -179,5 +185,28 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(config.alpn_protocols, vec![b"h3".to_vec()]);
+    }
+
+    /// The generated self-signed certificate must be signable by `rcgen` with
+    /// the `ring` backend and produce a `PKCS#8 v1` private key that `ring`
+    /// (and therefore `rustls`) accepts for client authentication.
+    #[test]
+    fn client_auth_material_is_ring_compatible() {
+        init();
+        let signing_key = SigningKey::generate().unwrap();
+        let (cert_der, key_der) = crate::cert::generate_self_signed_cert(&signing_key).unwrap();
+        assert!(!cert_der.is_empty());
+        assert_eq!(key_der, signing_key.pkcs8_der().to_vec());
+
+        let signing_key = rustls::crypto::ring::sign::any_ecdsa_type(&PrivateKeyDer::Pkcs8(
+            key_der.into(),
+        ))
+        .expect("ring provider must parse our PKCS#8 v1 key");
+        let signer = signing_key
+            .choose_scheme(&[SignatureScheme::ECDSA_NISTP256_SHA256])
+            .expect("P-256 scheme must be offered");
+        let signature = signer.sign(b"hello").expect("signature must be produced");
+        assert!(!signature.is_empty());
     }
 }

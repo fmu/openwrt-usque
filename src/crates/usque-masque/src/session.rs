@@ -6,17 +6,15 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use rustls::ClientConfig;
 use thiserror::Error;
-use usque_crypto::{PeerPublicKey, QuicheClientCredentials};
+use usque_crypto::PeerPublicKey;
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub tls_config: Arc<ClientConfig>,
-    pub quiche_credentials: Arc<QuicheClientCredentials>,
     pub insecure: bool,
     pub peer_public_key: PeerPublicKey,
     pub endpoint: SocketAddr,
     pub sni: String,
-    pub use_http2: bool,
     pub keepalive_period: Duration,
     pub initial_packet_size: u16,
     pub connect_uri: String,

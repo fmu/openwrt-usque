@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(not(any(target_os = "linux", windows)))]
 mod unsupported;
