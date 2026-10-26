@@ -441,6 +441,7 @@ figure.cmd {
 figure.cmd pre {
   margin: 0;
   padding: 1rem 1.1rem;
+  transition: none;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   font-family: var(--font-mono);
@@ -458,6 +459,8 @@ figure.cmd code {
   font-size: inherit;
   white-space: pre;
 }
+/* when JS injects the copy button, reserve room above the first line */
+figure.cmd.has-copy pre { padding-top: 2.35rem; }
 .copy-btn {
   position: absolute;
   top: .45rem;

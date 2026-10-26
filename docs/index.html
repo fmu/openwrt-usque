@@ -229,6 +229,8 @@ apk add luci-app-usque</code></pre>
           <figure class="cmd">
             <pre><code>echo "https://fmu.github.io/openwrt-usque/feed/packages.adb" &gt;&gt; /etc/apk/repositories.d/customfeeds.list</code></pre>
           </figure>
+          <p class="fineprint">Running this twice adds the line twice — harmless, but remove
+          duplicates if you want a tidy file.</p>
         </li>
         <li>
           <h4>Refresh and install</h4>
@@ -256,13 +258,16 @@ apk add luci-app-usque</code></pre>
       <figure class="cmd">
         <pre><code>sha256sum /etc/apk/keys/usque.pem</code></pre>
       </figure>
-      <!-- When the Lead confirms the final signing key, publish the expected fingerprint here:
-           sha256 of keys/usque.pem was f47c63b55e2b28f49d2ff1f751ea6401043cb30821620ad2ac9ad1c7561abe4f
-           (must remain byte-identical to the file the feed is signed with). -->
-      <p>Compare the output with the
-      <code>usque.pem</code> committed in the repository — if the two match, the key you installed
-      is the one the feed is signed with. The installed version can also be checked after the fact
-      with <code>apk info -v usque</code>.</p>
+      <p>The SHA-256 of the published key file (as served at
+      <code>https://fmu.github.io/openwrt-usque/feed/usque.pem</code> and committed as
+      <code>keys/usque.pem</code> in the repository) is:</p>
+      <figure class="cmd">
+        <pre><code>f47c63b55e2b28f49d2ff1f751ea6401043cb30821620ad2ac9ad1c7561abe4f</code></pre>
+      </figure>
+      <p>If the two hashes match, the key you installed is the one the feed is signed with. If the
+      feed is ever re-keyed, this page is updated with the new fingerprint. You can also verify an
+      individual package file that you downloaded yourself with
+      <code>apk verify &lt;file.apk&gt;</code>.</p>
       <p>If the key is missing or does not match the index signature, apk refuses with an
       <code>UNTRUSTED signature</code> error. Fix the setup rather than bypassing it — but if you are
       stuck (for example, the key download was intercepted or the feed was rebuilt), you can install
@@ -316,6 +321,10 @@ apk update</code></pre>
           <p>The result is <code>/etc/usque/warp0.json</code>: an anonymous WARP device identity
           containing a private key and an access token. It is created with owner-only permissions —
           treat it like a password and never publish it.</p>
+          <p class="fineprint"><strong>Registration needs working internet.</strong> It happens over
+          HTTPS to Cloudflare through your normal WAN <em>before</em> the tunnel exists, so the
+          router must already be online (and its clock roughly correct) when you press the button.
+          Registration usually takes a few seconds.</p>
         </li>
         <li>
           <h4>Enable and start</h4>
@@ -327,8 +336,8 @@ apk update</code></pre>
         <li>
           <h4>Check the connection</h4>
           <p>The overview shows whether WARP is on, your egress IP and the Cloudflare colo (edge
-          location) that serves you. There is also a <strong>Test connection</strong> action that
-          performs the same check from the router:</p>
+          location) that serves you. There is also a connection check in the app that runs the same
+          probe from the router — or run it yourself:</p>
           <figure class="cmd">
             <pre><code>wget -qO- https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc|colo|warp)='</code></pre>
           </figure>
@@ -572,11 +581,23 @@ fw4 reload
 du -sh /usr/bin/usque
 apk cache clean</code></pre>
         </figure>
-        <p>Remove packages you do not use (<code>apk del &lt;name&gt;</code>), clear logs
-        (<code>rm -f /tmp/luci-indexcache*</code>, <code>logread -c</code> does not free flash), or
-        use extroot if your device supports it.</p>
+        <p>Remove packages you do not use (<code>apk del &lt;name&gt;</code>), clear the LuCI
+        cache (<code>rm -f /tmp/luci-indexcache*</code>), or move the overlay to a USB stick with
+        extroot if your device supports it. A 16&nbsp;MB-flash router will usually struggle to fit a
+        multi-megabyte binary; a device with more flash is a better fit.</p>
       </details>
 
+      <details class="faq">
+        <summary>“Generate WARP configuration” fails</summary>
+        <p>Registration is a normal HTTPS request through your existing WAN connection, so it cannot
+        work while the router itself has no internet. Check, in this order: <code>ping 1.1.1.1</code>,
+        DNS (<code>nslookup www.cloudflare.com</code>), the system time (<code>date</code>), then the
+        daemon log. If the WAN is up and the clock is right, retry — Cloudflare sometimes rate-limits
+        registrations, so wait a minute rather than clicking repeatedly.</p>
+        <p>On the command line the same action is
+        <code>usque --config /etc/usque/warp0.json register --accept-tos --force -n "my-openwrt"</code>,
+        which prints the actual error.</p>
+      </details>
       <details class="faq">
         <summary>Device limit, or re-registering creates a new device every time</summary>
         <p>Every <em>Generate WARP configuration</em> registers a <strong>new</strong> device in your
@@ -872,6 +893,7 @@ apk del luci-app-usque usque</code></pre>
         announce('Copy failed — the commands are selected, press Ctrl+C');
       });
     });
+    fig.classList.add('has-copy');
     fig.appendChild(btn);
   });
 })();
