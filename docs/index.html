@@ -70,7 +70,7 @@
       </div>
       <p class="hero-meta">
         Based on <a href="https://github.com/FireMasterK/usque-rs" rel="noopener">FireMasterK/usque-rs</a>
-        · target <strong>ipq40xx</strong> (armv7), OpenWrt 25.12.6
+        · tunnel and routing verified on a live <strong>ipq40xx</strong> (armv7) router with OpenWrt 25.12.6
         · not affiliated with Cloudflare
       </p>
     </div>
@@ -163,6 +163,13 @@
               <th scope="row">Free space</th>
               <td>About <strong>3&nbsp;MB</strong> free in <code>/overlay</code> for the binary and the
               LuCI app. Check with <code>df -h /overlay</code> first.</td>
+            </tr>
+            <tr>
+              <th scope="row">Measured footprint</th>
+              <td>On the test router: about <strong>2.8&nbsp;MB</strong> static binary,
+              ~6.7&nbsp;MB resident memory while connected, and roughly 1&nbsp;% of one CPU core
+              when idle. The tunnel runs in user space, so throughput is bounded by the router's
+              CPU.</td>
             </tr>
             <tr>
               <th scope="row">Network</th>
@@ -348,7 +355,10 @@ apk update</code></pre>
           </figure>
           <p>The result is <code>/etc/usque/warp0.json</code>: an anonymous WARP device identity
           containing a private key and an access token. It is created with owner-only permissions —
-          treat it like a password and never publish it.</p>
+          treat it like a password and never publish it. Ticking the box is what accepts Cloudflare's
+          WARP terms; if you skip the UI and just start the service with
+          <code>auto_register=1</code>, the init script registers a device for you and accepts the
+          terms implicitly.</p>
           <p class="fineprint"><strong>Registration needs working internet.</strong> It happens over
           HTTPS to Cloudflare through your normal WAN <em>before</em> the tunnel exists, so the
           router must already be online (and its clock roughly correct) when you press the button.
@@ -356,10 +366,13 @@ apk update</code></pre>
         </li>
         <li>
           <h4>Enable and start</h4>
-          <p>Turn on <strong>Enabled</strong> (this is <code>usque.main.enabled</code>), click
-          <strong>Save &amp; Apply</strong>, then press <strong>Start</strong>. The status card should
-          switch to <em>running</em> within a few seconds, and <code>warp0</code> appears as an
+          <p>Turn on <strong>Enable usque service</strong> (this is <code>usque.main.enabled</code>),
+          click <strong>Save &amp; Apply</strong>, then press <strong>Start</strong>. The status card
+          should switch to <em>running</em> within a few seconds, and <code>warp0</code> appears as an
           interface.</p>
+          <p class="fineprint">The init script only starts the tunnel when the service is enabled: if
+          you press Start while it is disabled, nothing happens and the app tells you to enable it
+          first. The same applies to <code>/etc/init.d/usque start</code>.</p>
         </li>
         <li>
           <h4>Check the connection</h4>
@@ -409,9 +422,11 @@ apk update</code></pre>
               <td>While connected, the hook adds a high-priority rule
               (<code>ip rule add priority 1000 from all lookup main</code>, plus the IPv6 equivalent
               when IPv6 is enabled) so the <strong>main routing table is authoritative</strong> and
-              traffic actually follows the WARP default route. The rule is removed when the tunnel
-              stops. This also overrides mwan3 policy routing while the tunnel is active — stop the
-              service if you need mwan3's per-WAN policies.</td>
+              traffic actually follows the WARP default route. Without it, mwan3-style fwmark rules
+              can divert traffic to the WAN while the tunnel looks healthy (the symptom is a running
+              tunnel with <code>warp=off</code> and no packets on the TUN interface). The rule is
+              removed when the tunnel stops. This also overrides mwan3 policy routing while the
+              tunnel is active — stop the service if you need mwan3's per-WAN policies.</td>
             </tr>
             <tr>
               <th scope="row">Endpoint bypass</th>
@@ -422,8 +437,10 @@ apk update</code></pre>
               <th scope="row">Firewall</th>
               <td>A dedicated <code>usque</code> zone bound to the <code>warp0</code> device
               (<em>input REJECT, output ACCEPT, forward REJECT</em>) with <strong>masquerading</strong>
-              and MSS/MTU fixing, plus forwarding from <code>lan</code> into the zone. Your existing
-              <code>wan</code> zone is not modified.</td>
+              (IPv4 and IPv6) and MSS/MTU fixing. Every internal zone that forwards to
+              <code>wan</code> gets a forwarding into the tunnel — always <code>lan</code>, and also
+              e.g. <code>guest</code> if you have one — so LAN/guest clients keep internet access.
+              Your existing <code>wan</code> zone is not modified.</td>
             </tr>
             <tr>
               <th scope="row">DNS</th>
@@ -433,9 +450,9 @@ apk update</code></pre>
             </tr>
             <tr>
               <th scope="row">IPv6</th>
-              <td>Disabled by default. When <code>usque.main.ipv6</code> is enabled <em>and</em> the WAN
-              has IPv6 connectivity, a matching IPv6 default route via <code>warp0</code> is installed
-              as well.</td>
+              <td>Disabled by default. When <code>usque.main.ipv6</code> is enabled <em>and</em> the
+              tunnel has a global IPv6 address, a matching IPv6 default route via <code>warp0</code>
+              is installed as well (and the policy rule gets its IPv6 counterpart).</td>
             </tr>
             <tr>
               <th scope="row">Stop / disable</th>
@@ -483,7 +500,7 @@ apk update</code></pre>
             <tr><td><code>usque.main.ipv6</code></td><td><code>0</code></td><td>Also install an IPv6 default route through the tunnel.</td></tr>
             <tr><td><code>usque.main.endpoint_port</code></td><td><code>443</code></td><td>UDP port used to reach the WARP endpoint.</td></tr>
             <tr><td><code>usque.main.always_reconnect</code></td><td><code>1</code></td><td>Reconnect automatically when the tunnel drops.</td></tr>
-            <tr><td><code>usque.main.auto_register</code></td><td><code>1</code></td><td>Register a new WARP device automatically if the config file is missing.</td></tr>
+            <tr><td><code>usque.main.auto_register</code></td><td><code>1</code></td><td>Register a new WARP device automatically if the config file is missing. Registration is non-interactive, so it <strong>accepts Cloudflare's WARP terms</strong> on your behalf — set it to <code>0</code> if you want to be asked.</td></tr>
             <tr><td><code>usque.main.device_name</code></td><td><code></code> (empty)</td><td>Name used when registering a new device.</td></tr>
             <tr><td><code>usque.main.log_level</code></td><td><code>info</code></td><td>Daemon log level: <code>error</code>, <code>warn</code>, <code>info</code>, <code>debug</code>.</td></tr>
           </tbody>
@@ -524,24 +541,34 @@ usque --version</code></pre>
 
       <h3 id="service">Service commands and logs</h3>
       <figure class="cmd">
-        <pre><code>/etc/init.d/usque start
+        <pre><code>/etc/init.d/usque start      # only starts if usque.main.enabled=1
 /etc/init.d/usque stop
 /etc/init.d/usque restart
-/etc/init.d/usque enable
+/etc/init.d/usque reload     # re-read UCI and restart the instance
+/etc/init.d/usque status
+/etc/init.d/usque enable     # start at boot
 /etc/init.d/usque disable
 
-logread -e usque          # recent log lines from the daemon
-logread -e usque -f       # follow live</code></pre>
+logread -e usque             # recent log lines from the daemon
+logread -e usque -f          # follow live</code></pre>
       </figure>
+      <p class="fineprint">If you edit UCI directly and only need the new options applied, run
+      <code>uci commit usque &amp;&amp; /etc/init.d/usque restart</code>. procd restarts the daemon at
+      most 5 times within an hour (10&nbsp;s apart) — after that it stays stopped until you restart
+      it, so fix the underlying error first.</p>
       <p>For deeper debugging set <code>uci set usque.main.log_level='debug'</code>, restart the
       service and watch <code>logread -e usque</code>.</p>
 
       <h3 id="ubus">Status over ubus</h3>
       <p>The LuCI app is backed by an rpcd script, which is also handy for scripts and monitoring:</p>
       <figure class="cmd">
-        <pre><code>ubus call luci.usque status     # service/tunnel state, egress IP, config summary
-ubus call luci.usque test       # one-shot internet + WARP check through the tunnel
-ubus call luci.usque logs       # recent usque log lines</code></pre>
+        <pre><code>ubus call luci.usque status        # service/tunnel state, egress IP, interface, config state
+ubus call luci.usque getConfig     # public config fields only (never key/token)
+ubus call luci.usque test          # one-shot internet + WARP check through the tunnel
+ubus call luci.usque logs          # recent usque log lines
+ubus call luci.usque setInitAction '{"action":"restart"}'
+ubus call luci.usque register      '{"name":"my-openwrt","accept_tos":true}'
+ubus call luci.usque registerStatus</code></pre>
       </figure>
     </div>
   </section>
@@ -577,6 +604,9 @@ ubus call luci.usque logs       # recent usque log lines</code></pre>
           <li>Is TUN available? <code>lsmod | grep tun</code> and
           <code>ls -l /dev/net/tun</code>. Install the module with <code>apk add kmod-tun</code> and
           reboot.</li>
+          <li>If the log says <em>could not resolve route to endpoint</em>, the hook deliberately
+          left your default routes untouched (safe). Check that the WAN has a default route and a
+          reachable gateway, then restart the service.</li>
           <li>Is UDP/443 blocked? The tunnel needs UDP/443 to Cloudflare's WARP endpoints (the
           config file lists them, e.g. <code>162.159.198.2</code>). Some tethering, hotel, corporate
           or ISP setups block it. This build is trimmed to QUIC and has no TCP fallback — if UDP is
@@ -596,6 +626,24 @@ ubus call luci.usque logs       # recent usque log lines</code></pre>
         <a href="#install"><code>--allow-untrusted</code> fallback</a> is a last resort only.</p>
       </details>
 
+      <details class="faq">
+        <summary>Tunnel is running but traffic still exits via my ISP (<code>warp=off</code>)</summary>
+        <p>This is the policy-routing trap: mwan3 (or any fwmark/IP-rule based policy routing) can be
+        evaluated before the main table and silently send traffic to the WAN, even though
+        <code>ip route get</code> shows the tunnel. The packaged hook prevents it with a
+        priority-1000 rule. Check that the rule is present:</p>
+        <figure class="cmd">
+          <pre><code>ip rule show | grep '^1000:'
+ip -6 rule show | grep '^1000:'
+
+# if it is missing (hook did not run), add it for the current session:
+ip rule add priority 1000 from all lookup main
+ip -6 rule add priority 1000 from all lookup main   # only with IPv6 enabled</code></pre>
+        </figure>
+        <p><code>logread -e usque</code> should contain <em>installed IPv4 policy rule: priority 1000
+        from all lookup main</em>. On stop, disable or uninstall, the rule is removed again — mwan3
+        keeps working normally when the tunnel is off.</p>
+      </details>
       <details class="faq">
         <summary>No internet after stopping or uninstalling the tunnel</summary>
         <p>If a stale default route survived a crash, restore normal routing:</p>
@@ -648,9 +696,12 @@ apk cache clean</code></pre>
       <details class="faq">
         <summary>LAN clients are not using the tunnel</summary>
         <p>The tunnel only affects traffic that follows the router's default route. Check that the
-        <code>usque</code> firewall zone and the <code>lan → usque</code> forwarding exist
-        (<code>fw4 print | grep -A4 usque</code>) and that clients use the router as their gateway and
-        DNS server. A client with a static public DNS or its own VPN bypasses the router's tunnel.</p>
+        <code>usque</code> firewall zone and the forwardings into it exist
+        (<code>fw4 print | grep -A4 usque</code>; <code>lan</code> and any other internal zone that
+        forwards to <code>wan</code> are wired up automatically) and that clients use the router as
+        their gateway and DNS server. A client with a static public DNS or its own VPN bypasses the
+        router's tunnel. Also check the priority-1000 <code>ip rule</code> as described above if you
+        run mwan3.</p>
       </details>
 
       <details class="faq">
@@ -688,7 +739,8 @@ apk del luci-app-usque usque</code></pre>
           <tbody>
             <tr><th scope="row">Binary, init script, hook</th><td>Removed.</td></tr>
             <tr><th scope="row">LuCI view, menu, ACL, rpcd backend</th><td>Removed.</td></tr>
-            <tr><th scope="row">Firewall zone / forwarding</th><td>Removed by the package's cleanup scripts. If a stale zone remains, check <code>uci show firewall | grep -i usque</code>, delete the matching section with <code>uci delete firewall.&lt;section&gt;</code>, <code>uci commit firewall</code> and <code>fw4 reload</code>.</td></tr>
+            <tr><th scope="row">Firewall zone / forwarding</th><td>Removed by the package's <code>prerm</code> cleanup (which calls <code>/usr/libexec/usque/firewall teardown</code>). If you removed the package files by hand or a stale zone remains, check <code>uci show firewall | grep -i usque</code>, delete the matching sections with <code>uci delete firewall.&lt;section&gt;</code>, <code>uci commit firewall</code> and <code>fw4 reload</code>.</td></tr>
+            <tr><th scope="row">Routes, policy rules, run state</th><td>Removed on stop (and by a fallback in the init script). Transient state lives in <code>/var/run/usque/</code> and disappears on reboot.</td></tr>
             <tr><th scope="row"><code>/etc/config/usque</code></th><td>Kept (it is a conffile). Delete it manually if you want a completely clean system: <code>rm -f /etc/config/usque</code>.</td></tr>
             <tr><th scope="row"><code>/etc/usque/warp0.json</code></th><td>Kept, because it is your device identity. Delete it if you will not reuse it: <code>rm -f /etc/usque/warp0.json</code>.</td></tr>
             <tr><th scope="row">Feed entry &amp; key</th><td>Still configured. Remove them with the <a href="#remove-repo">repository removal commands</a>.</td></tr>
@@ -715,9 +767,9 @@ apk del luci-app-usque usque</code></pre>
       <details class="faq">
         <summary>Which routers are supported?</summary>
         <p>Right now the feed only contains <code>arm_cortex-a7_neon-vfpv4</code> packages
-        (<code>ipq40xx/generic</code>) built against OpenWrt 25.12.6. This is the only architecture
-        that is built and exercised so far; other targets would need their own build — the workflow
-        is in the repository if you want to add one.</p>
+        (<code>ipq40xx/generic</code>) built against OpenWrt 25.12.6. That is also the architecture
+        the tunnel and routing were verified on, using a live OpenWrt 25.12.6 router. Other targets
+        would need their own build — the workflow is in the repository if you want to add one.</p>
       </details>
       <details class="faq">
         <summary>Is WARP+ or Zero Trust supported?</summary>
@@ -807,7 +859,9 @@ apk del luci-app-usque usque</code></pre>
               (<code>build.yml</code>), SDK package build + feed signing (<code>package.yml</code>),
               site + feed deployment (<code>publish.yml</code>).</td></tr>
             <tr><td><code>keys/usque.pem</code></td><td>Public key used to verify the apk feed.</td></tr>
-            <tr><td><code>tests/</code></td><td>Live-router verification scripts and results.</td></tr>
+            <tr><td><code>tests/</code></td><td>Live-router verification scripts and results —
+              see <a href="https://github.com/fmu/openwrt-usque/blob/main/tests/RESULTS.md" rel="noopener"><code>tests/RESULTS.md</code></a>
+              for the router model, test matrix and measured values.</td></tr>
             <tr><td><code>docs/</code></td><td>This static site (plain HTML/CSS, no build step).</td></tr>
             <tr><td><code>LICENSE.md</code>, <code>README.md</code></td><td>MIT licence text and the
               project overview.</td></tr>
