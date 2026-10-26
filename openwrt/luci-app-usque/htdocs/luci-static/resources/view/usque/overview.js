@@ -16,7 +16,7 @@
 
 var DOCS_URL = 'https://fmu.github.io/openwrt-usque/';
 var TOS_URL = 'https://www.cloudflare.com/application/terms/';
-var POLL_INTERVAL = 3;
+var POLL_INTERVAL = 5;
 
 /* rpcd methods (see /usr/libexec/rpcd/luci.usque) */
 var callStatus = rpc.declare({ object: 'luci.usque', method: 'status', expect: {} });
@@ -29,9 +29,10 @@ var callLogs = rpc.declare({ object: 'luci.usque', method: 'logs', expect: {} })
 var callDeleteConfig = rpc.declare({ object: 'luci.usque', method: 'deleteConfig', expect: {} });
 var callFixPermissions = rpc.declare({ object: 'luci.usque', method: 'fixConfigPermissions', expect: {} });
 
-/* uci commit is needed because Map.save() only stages changes in the uci session;
- * the init script reads the committed /etc/config/usque. */
-var callUciCommit = rpc.declare({ object: 'uci', method: 'commit', params: [ 'config' ], expect: {} });
+/* Map.save() only stages changes in the uci session delta; the init script reads
+ * the committed /etc/config/usque, so we have to commit (apply) before restarting.
+ * "uci apply" is part of the standard LuCI ACLs, plain "uci commit" is not. */
+var callUciApply = rpc.declare({ object: 'uci', method: 'apply', params: [ 'timeout', 'rollback' ], expect: {} });
 
 /* -------------------------------------------------------------------------
  * small helpers
@@ -131,8 +132,7 @@ return view.extend({
 		var accountSection = this.renderAccountSection();
 		var diagSection = this.renderDiagnosticsSection();
 
-		var map = new form.Map('usque', _('usque (Cloudflare WARP)'),
-			_('Cloudflare WARP (MASQUE) client. While connected, the service routes traffic through a TUN interface; the WAN default route is kept for failover.'));
+		var map = new form.Map('usque', '', _('Requires UDP 443 to Cloudflare. While the tunnel is up, policy routing/mwan3 rules for the default route are overridden. These options are written to /etc/config/usque; Save & Apply commits them and restarts the service.'));
 		this.map = map;
 		this.buildForm(map);
 
@@ -215,7 +215,7 @@ return view.extend({
 			valueRow(_('Endpoints'), [ this.elEndpoint ]),
 			valueRow(_('Egress test'), [ this.elEgress, ' ', this.btnTest ]),
 			valueRow(_('Service control'), E('div', {}, [ this.btnStart, ' ', this.btnStop, ' ', this.btnRestart ]),
-				_('Start/Stop act on /etc/init.d/usque immediately. The options below are applied with Save & Apply, which also restarts the service.'))
+				_('Start/Stop act on /etc/init.d/usque immediately. The configuration below is applied with Save & Apply, which also restarts the service.'))
 		]);
 	},
 
@@ -239,7 +239,7 @@ return view.extend({
 		running = !!st.running;
 		enabled = !!st.enabled;
 
-		if (running && st.pid)
+		if (running)
 			setBadge(this.elService, _('Running'), 'success');
 		else if (enabled)
 			setBadge(this.elService, _('Stopped'), 'warning');
@@ -247,9 +247,12 @@ return view.extend({
 			setBadge(this.elService, _('Disabled'), '');
 
 		if (running) {
-			this.elServiceNote.textContent = st.uptime > 0
-				? _('pid %s, up %s').format(dash(st.pid), fmtDuration(st.uptime))
-				: _('pid %s').format(dash(st.pid));
+			if (st.uptime > 0)
+				this.elServiceNote.textContent = _('pid %s, up %s').format(dash(st.pid), fmtDuration(st.uptime));
+			else if (st.pid)
+				this.elServiceNote.textContent = _('pid %s').format(st.pid);
+			else
+				this.elServiceNote.textContent = '';
 		}
 		else if (!st.installed) {
 			this.elServiceNote.textContent = _('usque binary not installed');
@@ -287,10 +290,14 @@ return view.extend({
 
 		if (st.config_exists && !st.config_secure)
 			setBadge(this.elConfigPerm, _('mode %s — private key is readable by other users!').format(dash(st.config_mode)), 'important');
-		else if (st.config_exists && st.config_mode)
+		else if (st.config_exists && st.config_mode) {
+			this.elConfigPerm.className = 'cbi-value-description';
 			this.elConfigPerm.textContent = _('mode %s').format(st.config_mode);
-		else
+		}
+		else {
+			this.elConfigPerm.className = 'cbi-value-description';
 			this.elConfigPerm.textContent = '';
+		}
 
 		this.elDevice.textContent = dash(st.device_id);
 		this.elWarpV4.textContent = dash(st.warp_ipv4);
@@ -301,8 +308,6 @@ return view.extend({
 			endpoints.push(st.endpoint_v4);
 		if (st.endpoint_v6)
 			endpoints.push(st.endpoint_v6);
-		if (st.endpoint_h2_v4)
-			endpoints.push(_('HTTP/2: %s').format(st.endpoint_h2_v4));
 		this.elEndpoint.textContent = endpoints.length ? endpoints.join(' · ') : '—';
 
 		if (this.lastTest) {
@@ -455,6 +460,7 @@ return view.extend({
 			this.btnFixPerms.style.display = '';
 		}
 		else {
+			this.accPerm.className = 'cbi-value-description';
 			this.accPerm.textContent = '';
 			this.btnFixPerms.style.display = 'none';
 		}
@@ -465,7 +471,7 @@ return view.extend({
 	 * ------------------------------------------------------------------ */
 
 	buildForm: function(map) {
-		var s = map.section(form.NamedSection, 'main', 'usque');
+		var s = map.section(form.NamedSection, 'main', 'usque', _('Configuration'));
 		var o;
 
 		o = s.option(form.Flag, 'enabled', _('Enable service on boot'));
@@ -513,11 +519,6 @@ return view.extend({
 		o.default = '0';
 		o.rmempty = false;
 		o.description = _('Assign and route the WARP IPv6 address (only useful if the WAN has IPv6).');
-
-		o = s.option(form.Flag, 'http2', _('HTTP/2 fallback'));
-		o.default = '0';
-		o.rmempty = false;
-		o.description = _('Fall back to MASQUE over HTTP/2 (TCP) when UDP is blocked, e.g. on some mobile tethering connections.');
 
 		o = s.option(form.Flag, 'always_reconnect', _('Always reconnect'));
 		o.default = '1';
@@ -640,7 +641,8 @@ return view.extend({
 			_('Running egress test through %s…').format(iface)));
 
 		return L.resolveDefault(callTest(), null).then(function(res) {
-			self.lastTest = res;
+			if (res && res.ok === true)
+				self.lastTest = res;
 			self.renderTestResult(res);
 			return self.refresh();
 		});
@@ -855,6 +857,7 @@ return view.extend({
 		this.regText.textContent = res.timed_out
 			? _('Registration timed out.')
 			: _('Registration failed (exit code %s).').format(dash(res.rc));
+		this.regBox.style.display = '';
 		if (res.output) {
 			this.regOutput.style.display = '';
 			this.regOutput.textContent = res.output;
@@ -871,36 +874,50 @@ return view.extend({
 
 	applyServiceState: function() {
 		var self = this;
-		var enabled = parseBool(uci.get('usque', 'main', 'enabled'));
+		var rawEnabled = uci.get('usque', 'main', 'enabled');
+		var enabled = (rawEnabled != null) ? parseBool(rawEnabled) : null;
+		var tasks = [];
 
-		return L.resolveDefault(callSetInitAction(enabled ? 'enable' : 'disable'), null).then(function(res) {
-			if (!res || res.ok !== true)
-				throw new Error(errText(res));
-			return L.resolveDefault(callSetInitAction(enabled ? 'restart' : 'stop'), null);
-		}).then(function(res) {
-			if (!res || res.ok !== true)
-				throw new Error(errText(res));
+		if (enabled === true)
+			tasks.push(callSetInitAction('enable'));
+		else if (enabled === false)
+			tasks.push(callSetInitAction('disable'));
+
+		tasks.push(callSetInitAction(enabled === false ? 'stop' : 'restart'));
+
+		return tasks.reduce(function(chain, task) {
+			return chain.then(function() {
+				return L.resolveDefault(task, null).then(function(res) {
+					if (!res || res.ok !== true)
+						throw new Error(errText(res));
+				});
+			});
+		}, Promise.resolve()).then(function() {
 			ui.addNotification(_('Configuration saved'), E('p', {},
-				enabled
-					? _('usque was restarted with the new configuration.')
-					: _('usque was stopped and disabled (enabled=0).')), 'success');
+				enabled === false
+					? _('usque was stopped and disabled (enabled=0).')
+					: _('usque was restarted with the new configuration.')), 'success');
 			return self.refresh();
 		}).catch(function(err) {
 			ui.addNotification(_('Service control failed'), E('p', {}, err.message || String(err)), 'danger');
 		});
 	},
 
-	handleSaveApply: function(ev, mode) {
+	handleSaveApply: function(ev) {
 		var self = this;
 
 		/* 1. stage the form values in the uci session (View.handleSave)
-		 * 2. commit /etc/config/usque so the init script sees them
+		 * 2. commit them (uci apply) so the init script sees them
 		 * 3. enable/disable + restart the service
-		 * 4. run the regular "apply" UI (reload/settle handling) */
+		 * 4. drop the "unsaved changes" indicator */
 		return this.super('handleSave', [ ev ])
-			.then(function() { return callUciCommit('usque'); })
+			.then(function() { return callUciApply(10, false); })
 			.then(function() { return self.applyServiceState(); })
-			.then(function() { return ui.changes.apply(mode == '0'); })
+			.then(function() {
+				/* everything is committed now, drop the stale change badge */
+				if (ui.changes && typeof(ui.changes.setIndicator) === 'function')
+					ui.changes.setIndicator(0);
+			})
 			.catch(function(err) {
 				ui.addNotification(_('Save failed'), E('p', {}, err.message || String(err)), 'danger');
 				return self.refresh();
