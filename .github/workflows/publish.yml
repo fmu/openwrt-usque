@@ -1,0 +1,54 @@
+name: Publish site
+
+# Publishes the GitHub Pages site (docs) and, once the package pipeline is
+# wired in, the signed apk feed. This initial version only publishes the docs
+# and the public signing key; the feed job is added by the Lead after the
+# binary/package workflows are green.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "keys/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Assemble site
+        run: |
+          set -euo pipefail
+          rm -rf site
+          mkdir -p site/feed
+          cp -r docs/. site/
+          cp keys/usque.pem site/feed/usque.pem
+          # GitHub Pages runs Jekyll by default; disable it so filenames are
+          # served verbatim (the deploy-pages artifact bypasses Jekyll anyway).
+          touch site/.nojekyll
+          find site -maxdepth 3 -type f | sort
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
