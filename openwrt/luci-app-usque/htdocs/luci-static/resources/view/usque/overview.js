@@ -573,13 +573,28 @@ return view.extend({
 		o.modalonly = true;
 		o.depends('mode', 'cloudflare');
 
+		/* custom-only options: the init script passes -s/--authority/--protocol
+		 * whenever they are set, also in cloudflare mode, so clear them when
+		 * the connection is not in custom mode */
+		var customOnlyWrite = function(option) {
+			return function(section_id, formvalue) {
+				var mode = this.map.data.get(this.map.config, section_id, 'mode');
+
+				if (mode === 'custom' && formvalue != null && formvalue !== '')
+					uci.set(this.map.config, section_id, option, formvalue);
+				else
+					uci.unset(this.map.config, section_id, option);
+			};
+		};
+
 		o = g.option(form.Value, 'sni', _('TLS SNI (custom mode)'));
 		o.default = '';
 		o.optional = true;
 		o.placeholder = 'example.com';
 		o.modalonly = true;
 		o.depends('mode', 'custom');
-		o.description = _('TLS server name for non-Cloudflare endpoints (-s). A hostname is fine here; leave empty to use the default (the endpoint IP).');
+		o.description = _('TLS server name for non-Cloudflare endpoints (-s). A hostname is fine here; leave empty to use the default (the endpoint IP). Cleared automatically when the mode is not custom.');
+		o.write = customOnlyWrite('sni');
 
 		o = g.option(form.Value, 'authority', _('HTTP authority (custom mode)'));
 		o.default = '';
@@ -587,7 +602,8 @@ return view.extend({
 		o.placeholder = 'https://cloudflareaccess.com';
 		o.modalonly = true;
 		o.depends('mode', 'custom');
-		o.description = _('CONNECT :authority presented to a non-Cloudflare MASQUE server (--authority). A bare host is normalised to https://<host>. Leave empty for the Cloudflare default.');
+		o.description = _('CONNECT :authority presented to a non-Cloudflare MASQUE server (--authority). A bare host is normalised to https://<host>. Leave empty for the Cloudflare default. Cleared automatically when the mode is not custom.');
+		o.write = customOnlyWrite('authority');
 
 		o = g.option(form.ListValue, 'protocol', _('CONNECT protocol (custom mode)'));
 		o.default = '';
@@ -597,7 +613,8 @@ return view.extend({
 		o.depends('mode', 'custom');
 		o.value('', _('Default (cf-connect-ip, Cloudflare)'));
 		o.value('connect-ip', _('connect-ip (RFC 9484)'));
-		o.description = _('Protocol token for the CONNECT request (--protocol). Leave empty for Cloudflare (cf-connect-ip); pick connect-ip for RFC 9484 servers.');
+		o.description = _('Protocol token for the CONNECT request (--protocol). Leave empty for Cloudflare (cf-connect-ip); pick connect-ip for RFC 9484 servers. Cleared automatically when the mode is not custom.');
+		o.write = customOnlyWrite('protocol');
 
 		o = g.option(form.ListValue, 'log_level', _('Log level'));
 		o.default = 'info';

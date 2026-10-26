@@ -212,8 +212,12 @@ const uciStore = {
 	'usque.settings.lan_ipv6': '0'
 };
 
+const uciWrites = [];
+
 const uci = {
 	get: function(c, s, o) { const k = c + '.' + s + '.' + o; return Object.prototype.hasOwnProperty.call(uciStore, k) ? uciStore[k] : null; },
+	set: function(c, s, o, v) { uciWrites.push([ 'set', c, s, o, v ]); uciStore[c + '.' + s + '.' + o] = v; },
+	unset: function(c, s, o) { uciWrites.push([ 'unset', c, s, o ]); delete uciStore[c + '.' + s + '.' + o]; },
 	load: function() { return Promise.resolve(); },
 	sections: function(config, type) { return uciSectionsFixture.slice(); }
 };
@@ -278,7 +282,7 @@ const form = {
 				return sid;
 			},
 			sections: function() { return uciSectionsFixture.slice(); },
-			get: function(c, sid, opt) { return null; },
+			get: function(c, sid, opt) { return uci.get(c, sid, opt); },
 			set: function() {},
 			remove: function(c, sid) {
 				uciSectionsFixture = uciSectionsFixture.filter(function(s) { return s['.name'] !== sid; });
@@ -517,6 +521,25 @@ function rpcMethodsSince(index) {
 		const values = proto.values.map(function(v) { return v[0]; });
 		assert(values.indexOf('') !== -1 && values.indexOf('connect-ip') !== -1,
 			'protocol values: ' + JSON.stringify(values));
+	});
+
+	await t('custom-only options are cleared when mode is not custom', function() {
+		const grid = v.map.sections[1];
+		const authority = grid.options.filter(function(x) { return x.option === 'authority'; })[0];
+		const protocol = grid.options.filter(function(x) { return x.option === 'protocol'; })[0];
+		uciStore['usque.main.mode'] = 'cloudflare';
+		uciWrites.length = 0;
+		authority.write.call({ map: v.map }, 'main', 'https://example.com');
+		protocol.write.call({ map: v.map }, 'main', 'connect-ip');
+		assert(uciWrites.length === 2 && uciWrites[0][0] === 'unset' && uciWrites[1][0] === 'unset',
+			'cloudflare mode clears custom options: ' + JSON.stringify(uciWrites));
+
+		uciStore['usque.main.mode'] = 'custom';
+		uciWrites.length = 0;
+		authority.write.call({ map: v.map }, 'main', 'https://example.com');
+		protocol.write.call({ map: v.map }, 'main', 'connect-ip');
+		assert(uciWrites[0][0] === 'set' && uciWrites[0][4] === 'https://example.com', 'authority written in custom mode');
+		assert(uciWrites[1][0] === 'set' && uciWrites[1][4] === 'connect-ip', 'protocol written in custom mode');
 	});
 
 	await t('default_route defaults to OFF (opt-in)', function() {
