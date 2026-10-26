@@ -25,6 +25,7 @@
   --warn-bg: #fff5e6;
   --warn-border: #d97706;
   --ok: #15803d;
+  --ok-soft: #edf8f0;
   --shadow: 0 1px 2px rgba(23, 24, 28, .05), 0 12px 28px -18px rgba(23, 24, 28, .35);
   --radius: 14px;
   --radius-sm: 10px;
@@ -56,6 +57,7 @@
     --warn-bg: #2a2113;
     --warn-border: #e0a13a;
     --ok: #4ade80;
+    --ok-soft: #10261a;
     --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 16px 32px -20px rgba(0, 0, 0, .8);
   }
 }
@@ -398,6 +400,38 @@ section > .wrap > h2 { margin-bottom: .4rem; }
   color: var(--muted);
 }
 
+/* two-state comparison (routing off vs on) */
+.two-up {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  margin: 1.1rem 0 1.5rem;
+}
+.flow-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 1rem 1.15rem .95rem;
+  box-shadow: var(--shadow);
+}
+.flow-block h4 {
+  margin: 0 0 .55rem;
+  font-size: 1rem;
+}
+.flow-block .flow {
+  margin: .4rem 0 .65rem;
+  gap: .45rem;
+}
+.flow-block .flow li {
+  flex-basis: 7.5rem;
+  padding: .55rem .7rem;
+  font-size: .85rem;
+}
+.flow-block .fineprint {
+  margin: 0;
+  font-size: .82rem;
+}
+
 /* ---------- steps ---------- */
 ol.steps {
   list-style: none;
@@ -550,6 +584,10 @@ td strong { color: var(--text); }
 .callout.warn {
   border-left-color: var(--warn-border);
   background: var(--warn-bg);
+}
+.callout.ok {
+  border-left-color: var(--ok);
+  background: var(--ok-soft);
 }
 
 /* ---------- details / FAQ ---------- */
