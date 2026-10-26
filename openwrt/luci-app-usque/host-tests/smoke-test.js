@@ -1,5 +1,5 @@
 /*
- * Host-side smoke test for the luci-app-usque LuCI view.
+ * Host-side smoke test for the luci-app-usque LuCI view (v2, multi-connection).
  *
  * It stubs the LuCI runtime (view, form, rpc, poll, ui, uci, dom, E, _) just
  * enough to execute load()/render()/poll/handlers/save-apply and to detect
@@ -35,24 +35,33 @@ function El(tag, attrs, children) {
 		disabled: false,
 		value: '',
 		appendChild(c) { this.childNodes.push(c); return c; },
+		addEventListener() {},
+		removeEventListener() {},
+		setAttribute() {},
+		getAttribute() { return null; },
+		querySelector() { return null; },
+		querySelectorAll() { return []; },
 		classList: {
 			add(c) {
-				const set = new Set(String(node.className || '').split(/\s+/).filter(Boolean));
+				const set = new Set(String(this._node.className || '').split(/\s+/).filter(Boolean));
 				set.add(c);
-				node.className = Array.from(set).join(' ');
+				this._node.className = Array.from(set).join(' ');
 			},
 			remove(c) {
-				const set = new Set(String(node.className || '').split(/\s+/).filter(Boolean));
+				const set = new Set(String(this._node.className || '').split(/\s+/).filter(Boolean));
 				set.delete(c);
-				node.className = Array.from(set).join(' ');
+				this._node.className = Array.from(set).join(' ');
 			},
-			contains(c) { return String(node.className || '').split(/\s+/).indexOf(c) !== -1; }
+			contains(c) { return String(this._node.className || '').split(/\s+/).indexOf(c) !== -1; }
 		}
 	};
+
+	node.classList._node = node;
 	Object.defineProperty(node, 'textContent', {
-		get: function() { return this._textContent; },
-		set: function(v) { this._textContent = (v == null) ? '' : String(v); }
+		get() { return this._textContent; },
+		set(v) { this._textContent = (v == null) ? '' : String(v); }
 	});
+
 	append(node, children);
 	return node;
 }
@@ -67,12 +76,27 @@ function append(node, children) {
 		return;
 	}
 	if (isEl(children)) {
-		node.parent = node;
 		node.childNodes.push(children);
+		if (node.tagName === 'SELECT' && !node.value &&
+		    children.attributes && children.attributes.value != null)
+			node.value = String(children.attributes.value);
 		return;
 	}
-	/* text */
 	node.textContent = String(node.textContent || '') + String(children);
+}
+
+function textOfList(children) {
+	let out = '';
+	(children || []).forEach(function(c) { out += textOf(c); });
+	return out;
+}
+
+function textOf(node) {
+	if (!isEl(node))
+		return node == null ? '' : String(node);
+	let out = node.textContent || '';
+	node.childNodes.forEach(function(c) { out += textOf(c); });
+	return out;
 }
 
 global.E = function(tag, attrs, children) { return El(tag, attrs, children); };
@@ -91,7 +115,6 @@ String.prototype.format = function(...args) {
 		const v = args[i++];
 		if (m === '%d') return String(parseInt(v, 10) || 0);
 		if (m === '%j') return JSON.stringify(v);
-		if (m === '%h') return String(v);
 		return String(v);
 	});
 };
@@ -100,16 +123,22 @@ String.prototype.format = function(...args) {
 const notifications = [];
 const modals = [];
 const pollFns = [];
-const initActions = [];
 const rpcCalls = [];
-let statusData = null;
-let registerStatusData = null;
-let getConfigData = { ok: true, exists: true };
-let testData = null;
-let logsData = null;
+const initActions = [];
+
+let statusFixture = null;
+let getConfigFixture = { ok: true, exists: true, valid: true };
+let logsFixture = { ok: true, count: 2, lines: 'line one\nline two' };
+let testFixture = null;
+let registerFixture = { ok: true, started: true };
+let registerStatusFixture = null;
+let importFixture = { ok: true, imported: true };
+let deleteFixture = { ok: true, deleted: true };
+let permFixture = { ok: true, mode: '-rw-------' };
+let uciSectionsFixture = [ { '.name': 'main', '.type': 'usque', enabled: '1', mode: 'cloudflare', interface: 'warp0' } ];
 
 global.L = {
-	env: { sessionid: 'x', pollinterval: 5, apply_display: 5 },
+	env: { sessionid: 'x', pollinterval: 5 },
 	resolveDefault: function(promise, def) {
 		return Promise.resolve(promise).catch(function() { return def; });
 	},
@@ -124,25 +153,33 @@ global.document = {
 };
 global.window = { setTimeout: setTimeout, clearTimeout: clearTimeout };
 
+function fixtureFor(method) {
+	switch (method) {
+		case 'status': return statusFixture;
+		case 'getConfig': return getConfigFixture;
+		case 'logs': return logsFixture;
+		case 'test': return testFixture;
+		case 'register': return registerFixture;
+		case 'registerStatus': return registerStatusFixture;
+		case 'importConfig': return importFixture;
+		case 'deleteConfig': return deleteFixture;
+		case 'fixConfigPermissions': return permFixture;
+		case 'setInitAction': return { ok: true };
+		case 'apply': return {};
+		default: return { ok: true };
+	}
+}
+
 const rpc = {
 	declare: function(opts) {
-		const method = opts.method;
 		return function() {
-			rpcCalls.push({ object: opts.object, method: method, args: Array.prototype.slice.call(arguments) });
-			if (method === 'setInitAction')
-				initActions.push(arguments[0]);
-			return Promise.resolve(
-				method === 'status' ? statusData :
-				method === 'getConfig' ? getConfigData :
-				method === 'registerStatus' ? registerStatusData :
-				method === 'test' ? testData :
-				method === 'logs' ? logsData :
-				method === 'register' ? { ok: true, started: true } :
-				method === 'setInitAction' ? { ok: true, action: arguments[0] } :
-				method === 'deleteConfig' ? { ok: true, deleted: true } :
-				method === 'fixConfigPermissions' ? { ok: true, mode: '-rw-------' } :
-				{ ok: true }
-			);
+			const args = Array.prototype.slice.call(arguments);
+
+			rpcCalls.push({ object: opts.object, method: opts.method, args: args });
+			if (opts.method === 'setInitAction')
+				initActions.push(args[0]);
+
+			return Promise.resolve(fixtureFor(opts.method));
 		};
 	}
 };
@@ -153,28 +190,32 @@ const poll = {
 };
 
 const ui = {
-	createHandlerFn: function(ctx, name) {
+	createHandlerFn: function(ctx, name, ...args) {
 		const fn = ctx[name];
+
 		if (typeof fn !== 'function')
 			throw new Error('createHandlerFn: missing handler ' + name);
-		return function(ev) { return fn.call(ctx, ev || { currentTarget: El('button') }); };
+
+		return function(ev) { return fn.call(ctx, ...args, ev || { currentTarget: El('button') }); };
 	},
-	addNotification: function(title, content, cls) { notifications.push({ title: String(title), content: content, cls: cls }); },
+	addNotification: function(title, content, cls) {
+		notifications.push({ title: String(title), content: content, cls: cls });
+	},
 	showModal: function(title, children) { modals.push({ title: String(title), children: children }); },
 	hideModal: function() {},
 	changes: { setIndicator: function() {} }
 };
 
 const uciStore = {
-	'usque.main.enabled': '1',
-	'usque.main.device_name': '',
-	'usque.main.config_file': '/etc/usque/warp0.json'
+	'usque.main.interface': 'warp0',
+	'usque.main.mode': 'cloudflare',
+	'usque.settings.lan_ipv6': '0'
 };
 
 const uci = {
 	get: function(c, s, o) { const k = c + '.' + s + '.' + o; return Object.prototype.hasOwnProperty.call(uciStore, k) ? uciStore[k] : null; },
 	load: function() { return Promise.resolve(); },
-	sections: function() { return []; }
+	sections: function(config, type) { return uciSectionsFixture.slice(); }
 };
 
 const dom = {
@@ -184,19 +225,23 @@ const dom = {
 		append(node, children);
 		return node;
 	},
-	append: append
+	append: append,
+	findClassInstance: function() { return null; }
 };
 
+/* ---------- form stub ---------- */
 function Option(cls, name, title) {
-	this.cls = cls; this.option = name; this.title = title;
+	this.cls = cls;
+	this.option = name;
+	this.title = title;
 	this.values = [];
-	this.value = function(v, l) { this.values.push([v, l]); return this; };
 }
+Option.prototype.value = function(v, l) { this.values.push([ v, l ]); return this; };
 Option.prototype.depends = function() { return this; };
 
-function Section(map, type) {
-	this.map = map;
-	this.type = type;
+function Section(cls, args) {
+	this.cls = cls;
+	this.args = args;
 	this.options = [];
 }
 Section.prototype.option = function(cls, name, title) {
@@ -206,27 +251,38 @@ Section.prototype.option = function(cls, name, title) {
 };
 
 const form = {
-	NamedSection: function(map, sid, stype, title) { this.sid = sid; this.stype = stype; this.title = title; },
+	NamedSection: 'NamedSection',
+	GridSection: 'GridSection',
 	Flag: 'Flag',
 	Value: 'Value',
 	ListValue: 'ListValue',
 	MultiValue: 'MultiValue',
+	DummyValue: 'DummyValue',
 	Map: function(config, title, description) {
 		this.config = config;
 		this.title = title;
 		this.description = description;
 		this.mapEl = El('div', { 'class': 'cbi-map' });
 		this.sections = [];
-		this.section = function(cls, sid, stype, title) {
-			const s = new Section(this, stype);
-			s.sid = sid;
-			s.title = title;
+		this.section = function(cls, ...args) {
+			const s = new Section(cls, args);
 			this.sections.push(s);
 			return s;
 		};
-		this.render = function() {
-			append(this.mapEl, this.sections.map(function(s) { return El('div', { 'class': 'cbi-section' }); }));
-			return Promise.resolve(this.mapEl);
+		this.render = function() { return Promise.resolve(this.mapEl); };
+		this.save = function() { return Promise.resolve(); };
+		this.data = {
+			add: function(config, type, name) {
+				const sid = name || 'cfg' + (1000 + uciSectionsFixture.length);
+				uciSectionsFixture.push({ '.name': sid, '.type': type });
+				return sid;
+			},
+			sections: function() { return uciSectionsFixture.slice(); },
+			get: function(c, sid, opt) { return null; },
+			set: function() {},
+			remove: function(c, sid) {
+				uciSectionsFixture = uciSectionsFixture.filter(function(s) { return s['.name'] !== sid; });
+			}
 		};
 	}
 };
@@ -250,16 +306,9 @@ const view = {
 	}
 };
 
-/* ---------- load module ---------- */
+/* ---------- module loading ---------- */
 const src = fs.readFileSync(viewPath, 'utf8');
 
-/*
- * LuCI's module loader scans the module source and only treats the leading
- * string literals as dependency declarations ("require <name>" / "use strict");
- * any other string literal before them silently stops the scanning, which would
- * leave the module body with undefined variables. Replicating that loop here
- * guards against accidentally breaking the contract.
- */
 function parseLuCIRequires(source) {
 	const requirematch = /^require[ \t]+(\S+)(?:[ \t]+as[ \t]+([a-zA-Z_]\S*))?$/;
 	const strictmatch = /^use[ \t]+strict$/;
@@ -307,386 +356,476 @@ function parseLuCIRequires(source) {
 
 const EXPECTED_REQUIRES = [ 'view', 'form', 'rpc', 'poll', 'ui', 'uci', 'dom' ];
 const REQUIRES = parseLuCIRequires(src);
+
 const factory = new Function(
 	'window', 'document', 'L', 'view', 'form', 'rpc', 'poll', 'ui', 'uci', 'dom',
 	src + '\n'
 );
 
 /* ---------- fixtures ---------- */
-function baseStatus(over) {
+function conn(over) {
 	return Object.assign({
-		ok: true,
-		installed: true,
-		init_script: true,
-		enabled: true,
-		running: true,
-		pid: 1234,
-		uptime: 3671,
+		section: 'main',
+		name: 'main',
 		iface: 'warp0',
-		iface_exists: true,
-		iface_up: true,
-		iface_ipv4: '172.16.0.2',
-		iface_ipv6: '',
-		default_route_via_iface: true,
-		config_path: '/etc/usque/warp0.json',
+		mode: 'cloudflare',
+		enabled: true,
+		config_file: '/etc/usque/warp0.json',
 		config_exists: true,
 		config_valid: true,
 		config_secure: true,
 		config_mode: '-rw-------',
-		device_id: '<REDACTED_WARP_DEVICE_ID>',
+		config_size: 710,
+		mtu: '1400',
+		endpoint_port: '443',
+		always_reconnect: true,
+		auto_register: true,
+		device_name: '',
+		log_level: 'info',
+		sni: '',
+		default_route: false,
+		metric: 0,
+		ipv6: true,
+		ipv6_route: 'auto',
+		running: true,
+		pid: 4242,
+		uptime: 3600,
+		iface_exists: true,
+		iface_up: true,
+		iface_ipv4: '172.16.0.2',
+		iface_ipv6: '2606:4700:110::2',
+		route4_installed: false,
+		route6_installed: false,
+		device_id: 'device-1',
 		warp_ipv4: '172.16.0.2',
-		warp_ipv6: '<WARP_CLIENT_IPV6>',
+		warp_ipv6: '2606:4700:110::2',
 		endpoint_v4: '162.159.198.2',
-		endpoint_v6: '2606:4700:103::2',
-		endpoint_h2_v4: '162.159.198.2',
-		endpoint_h2_v6: '',
-		mtu: '1400'
+		endpoint_v6: '2606:4700:103::2'
 	}, over || {});
 }
 
-const configData = {
-	ok: true, exists: true, valid: true, secure: true, path: '/etc/usque/warp0.json',
-	mode: '-rw-------', size: 710, id: '104147c1', ipv4: '172.16.0.2',
-	ipv6: '2606:4700:110::2', endpoint_v4: '162.159.198.2', endpoint_v6: '',
-	endpoint_h2_v4: '162.159.198.2', endpoint_h2_v6: ''
-};
-
-const logsSample = { ok: true, count: 2, lines: 'line one\nline two' };
-
-function assert(cond, msg) {
-	if (!cond) throw new Error(msg);
+function makeStatus(connections, globals, service) {
+	return {
+		ok: true,
+		service: Object.assign({
+			init_script: true,
+			boot_enabled: true,
+			enabled_any: true,
+			running_any: true,
+			connection_count: connections.length
+		}, service || {}),
+		globals: Object.assign({
+			lan_ipv6: false,
+			lan_ipv6_prefix: '',
+			lan_device: 'br-lan',
+			lan_ula: 'fd12:3456:789a::/48',
+			lan_ra: 'server',
+			lan_ipv6_addrs: 'fd12:3456:789a:1::1 ',
+			wan_ipv6_default: false,
+			lan_ipv6_active: false
+		}, globals || {}),
+		connections: connections
+	};
 }
 
+function assert(cond, msg) {
+	if (!cond)
+		throw new Error(msg);
+}
+
+function lastNotification() {
+	return notifications[notifications.length - 1];
+}
+
+function rpcMethodsSince(index) {
+	return rpcCalls.slice(index).map(function(c) { return c.method; });
+}
+
+/* ---------- run ---------- */
 (async function run() {
 	let failures = 0;
+
 	const t = function(name, fn) {
 		return Promise.resolve().then(fn).then(function() {
 			console.log('ok: ' + name);
 		}).catch(function(err) {
-			console.error('FAIL: ' + name + ': ' + err.message + '\n' + (err.stack || ''));
+			console.error('FAIL: ' + name + ': ' + err.message);
+			if (err.stack)
+				console.error(err.stack.split('\n').slice(1, 3).join('\n'));
 			failures++;
 		});
 	};
 
-	const v = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
+	let v;
 
 	await t('module header parses as LuCI require list', function() {
 		assert(JSON.stringify(REQUIRES) === JSON.stringify(EXPECTED_REQUIRES),
 			'requires: ' + JSON.stringify(REQUIRES));
 	});
 
-	await t('module returns a view object with load/render', function() {
-		assert(typeof v === 'object' && v !== null, 'factory returned an object');
-		assert(typeof v.load === 'function', 'load() present');
-		assert(typeof v.render === 'function', 'render() present');
-		assert(typeof v.handleSaveApply === 'function', 'handleSaveApply() present');
-		assert(typeof v.handleRegister === 'function', 'handleRegister() present');
+	v = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
+
+	await t('module returns a view object with the expected handlers', function() {
+		assert(typeof v.load === 'function', 'load()');
+		assert(typeof v.render === 'function', 'render()');
+		assert(typeof v.handleSaveApply === 'function', 'handleSaveApply()');
+		assert(typeof v.handleStartSection === 'function', 'handleStartSection()');
+		assert(typeof v.handleImport === 'function', 'handleImport()');
+		assert(typeof v.handleRemoveConnection === 'function', 'handleRemoveConnection()');
 	});
 
-	/* --- state: configured + running --- */
-	statusData = baseStatus();
-	logsData = logsSample;
-	let data = await v.load();
-	await t('load() resolves status/getConfig/logs', function() {
+	await t('load() resolves status/logs/uci', async function() {
+		statusFixture = makeStatus([ conn() ]);
+		const data = await v.load();
 		assert(Array.isArray(data) && data.length === 3, 'three results');
-		assert(data[0] && data[0].device_id, 'status payload present');
+		assert(data[0] && data[0].connections, 'status payload');
 	});
 
-	let rootEl;
-	await t('render() builds a DOM tree', async function() {
-		rootEl = await v.render(data);
-		assert(isEl(rootEl), 'returned element');
-		assert(rootEl.childNodes.length === 4, 'four sections (status, account, map, diagnostics), got ' + rootEl.childNodes.length);
+	let root;
+
+	await t('render() builds the five page sections', async function() {
+		root = await v.render([ statusFixture, logsFixture, null ]);
+		assert(isEl(root), 'element');
+		assert(root.childNodes.length === 5, 'overview + connections + map + account + diagnostics, got ' + root.childNodes.length);
 	});
 
-	await t('status section shows Running/up/default route', function() {
-		assert(v.elService.textContent === 'Running', 'service badge: ' + v.elService.textContent);
-		assert(/warp0/.test(v.elIface.textContent), 'iface text: ' + v.elIface.textContent);
-		assert(v.elConfigPerm.className === 'cbi-value-description', 'secure config has no warning badge: ' + v.elConfigPerm.className);
-		assert(v.hasCfgBox.style.display === '', 'account summary visible');
-		assert(v.noCfgBox.style.display === 'none', 'generate box hidden');
+	await t('form is built with global settings + connection grid', function() {
+		assert(v.map.sections.length === 2, 'two sections, got ' + v.map.sections.length);
+		assert(v.map.sections[0].cls === 'NamedSection', 'settings section');
+		assert(v.map.sections[1].cls === 'GridSection', 'grid section');
+		const grid = v.map.sections[1];
+		assert(grid.addremove === true, 'grid addremove');
+		assert(typeof grid.sectiontitle === 'function', 'grid sectiontitle');
+		const names = grid.options.map(function(o) { return o.option; });
+		[ 'enabled', 'interface', 'mode', 'default_route', 'ipv6_route', 'ipv6', 'metric',
+		  'config_file', 'mtu', 'endpoint_port', 'always_reconnect', 'auto_register',
+		  'device_name', 'sni', 'log_level' ].forEach(function(n) {
+			assert(names.indexOf(n) !== -1, 'grid option ' + n);
+		});
+		const settings = v.map.sections[0];
+		const snames = settings.options.map(function(o) { return o.option; });
+		assert(snames.indexOf('lan_ipv6') !== -1 && snames.indexOf('lan_ipv6_prefix') !== -1, 'lan ipv6 options');
 	});
 
-	await t('poll function registered', function() {
+	await t('default_route defaults to OFF (opt-in)', function() {
+		const grid = v.map.sections[1];
+		const dr = grid.options.filter(function(o) { return o.option === 'default_route'; })[0];
+		assert(dr.default === '0', 'default_route default: ' + dr.default);
+		const v6 = grid.options.filter(function(o) { return o.option === 'ipv6'; })[0];
+		assert(v6.default === '1', 'ipv6 default ON');
+		const r6 = grid.options.filter(function(o) { return o.option === 'ipv6_route'; })[0];
+		assert(r6.default === 'auto', 'ipv6_route default auto');
+	});
+
+	await t('live table shows one row per connection', function() {
+		assert(v.statusBody.childNodes.length === 1, 'one row');
+		const row = textOf(v.statusBody.childNodes[0]);
+		assert(/main/.test(row) && /warp0/.test(row), 'row content: ' + row);
+		assert(/Running/.test(v.rowRefs.main.state.textContent), 'state badge');
+		assert(/172\.16\.0\.2/.test(v.rowRefs.main.v4.textContent), 'v4 address');
+	});
+
+	await t('overview explains that no default route is installed', function() {
+		assert(/no default route is installed/.test(textOf(root)), 'opt-in hint present');
+	});
+
+	await t('poll is registered and refreshes the table', async function() {
 		assert(pollFns.length >= 1, 'poll.add called');
-	});
-
-	await t('poll tick calls status and updates DOM', async function() {
-		statusData = baseStatus({ running: false, enabled: true, pid: 0, uptime: 0 });
-		const rpcBefore = rpcCalls.length;
-		await pollFns[0]();
-		assert(rpcCalls.length > rpcBefore, 'status rpc issued');
-		assert(v.elService.textContent === 'Stopped', 'badge: ' + v.elService.textContent);
-	});
-
-	/* --- insecure config --- */
-	await t('insecure config shows warning + fix button', function() {
-		v.updateStatus(baseStatus({ config_secure: false, config_mode: '-rw-r--r--' }));
-		assert(/important/.test(v.elConfigPerm.className), 'warning badge: ' + v.elConfigPerm.className);
-		assert(v.btnFixPerms.style.display === '', 'fix button visible');
-	});
-
-	await t('handleFixPermissions calls rpc and refreshes', async function() {
-		statusData = baseStatus();
-		v.updateStatus(statusData);
+		statusFixture = makeStatus([ conn({ running: false }) ]);
 		const before = rpcCalls.length;
-		await v.handleFixPermissions();
-		assert(rpcCalls.slice(before).some(function(c) { return c.method === 'fixConfigPermissions'; }), 'rpc called');
-		assert(v.btnFixPerms.style.display === 'none', 'fix button hidden again');
+		await pollFns[0]();
+		assert(rpcCalls.length > before, 'status rpc issued');
+		assert(/Stopped/.test(v.rowRefs.main.state.textContent), 'stopped badge');
 	});
 
-	/* --- no config yet --- */
-	await t('missing config shows the generate box', function() {
-		v.updateStatus(baseStatus({
-			config_exists: false, config_valid: false, config_secure: false,
-			device_id: '', warp_ipv4: '', warp_ipv6: '', config_mode: ''
-		}));
-		assert(v.noCfgBox.style.display === '', 'generate box visible');
-		assert(v.hasCfgBox.style.display === 'none', 'summary hidden');
+	await t('default route / ipv6 route badges reflect runtime state', function() {
+		v.updateStatus(makeStatus([ conn({ default_route: true, route4_installed: true, ipv6_route: 'always', route6_installed: true }) ]));
+		assert(/IPv4 default/.test(textOf(v.rowRefs.main.route)), 'v4 default badge');
+		assert(/IPv6 default/.test(textOf(v.rowRefs.main.route)), 'v6 default badge');
+		assert(/default route through/.test(textOf(root)), 'overview default route info');
 	});
 
-	await t('handleRegister without ToS only warns', async function() {
-		v.regTos.checked = false;
-		const notifBefore = notifications.length;
-		await v.handleRegister();
-		assert(notifications.length === notifBefore + 1, 'warning notification');
-		assert(notifications[notifications.length - 1].cls === 'warning', 'warning class');
+	await t('second connection gets its own row', function() {
+		v.updateStatus(makeStatus([
+			conn(),
+			conn({ section: 'cnt2', iface: 'warp9', mode: 'custom', enabled: false, running: false,
+				config_file: '/etc/usque/cnt2.json', config_exists: false, config_valid: false,
+				config_secure: false, config_mode: '' })
+		]));
+		assert(v.statusBody.childNodes.length === 2, 'two rows');
+		assert(v.rowRefs.cnt2, 'refs for cnt2');
+		assert(/Custom/.test(textOf(v.rowRefs.cnt2.mode)), 'custom mode badge');
+		assert(/Disabled/.test(v.rowRefs.cnt2.state.textContent), 'disabled badge');
+		assert(/no config/.test(textOf(v.rowRefs.cnt2.iface)), 'missing config badge');
 	});
 
-	await t('handleRegister with ToS starts registration and polls', async function() {
+	await t('warnings flag enabled connections without configuration', function() {
+		v.updateStatus(makeStatus([ conn({ enabled: true, config_exists: false, config_valid: false }) ]));
+		assert(/has no configuration file yet/.test(textOf(root)), 'missing config warning');
+	});
+
+	/* --- per-connection actions --- */
+	await t('start refuses for disabled connection', async function() {
+		const before = initActions.length;
+		const beforeNotifs = notifications.length;
+		await v.handleStartSection('cnt2');
+		assert(initActions.length === before, 'no init action');
+		assert(notifications.length === beforeNotifs + 1 && lastNotification().cls === 'warning', 'warning');
+	});
+
+	await t('start refuses without a config file', async function() {
+		v.updateStatus(makeStatus([ conn({ enabled: true, config_exists: false }) ]));
+		const before = initActions.length;
+		await v.handleStartSection('main');
+		assert(initActions.length === before, 'no init action');
+		assert(lastNotification().cls === 'warning', 'warning');
+	});
+
+	await t('start/stop/restart call setInitAction with the section', async function() {
+		statusFixture = makeStatus([ conn() ]);
+		v.updateStatus(statusFixture);
+		await v.handleStartSection('main');
+		await v.handleStopSection('main');
+		await v.handleRestartSection('main');
+		const calls = rpcCalls.filter(function(c) { return c.method === 'setInitAction'; }).slice(-3);
+		assert(calls[0].args[0] === 'start' && calls[0].args[1] === 'main', 'start main');
+		assert(calls[1].args[0] === 'stop' && calls[1].args[1] === 'main', 'stop main');
+		assert(calls[2].args[0] === 'restart' && calls[2].args[1] === 'main', 'restart main');
+	});
+
+	await t('test runs per section and stores the result', async function() {
+		testFixture = { ok: true, warp: 'on', ip: '104.28.0.1', colo: 'VIE', loc: 'AT',
+			bound: true, timestamp: '2026-01-01T00:00:00Z', method: 'curl --interface warp0', raw: 'warp=on\n' };
+		await v.handleTestSection('main');
+		assert(v.lastTest.main && v.lastTest.main.warp === 'on', 'lastTest stored');
+		assert(lastNotification().cls === 'success', 'success notification');
+		assert(/egress test/.test(textOf(v.rowRefs.main.route)), 'row shows egress result');
+	});
+
+	await t('test failure is reported visibly', async function() {
+		testFixture = { ok: false, error: 'no connectivity' };
+		await v.handleTestSection('main');
+		assert(lastNotification().cls === 'danger', 'danger notification');
+		assert(v.lastTest.main.warp === 'on', 'previous result kept');
+	});
+
+	await t('logs open a modal with the filtered tail', async function() {
+		logsFixture = { ok: true, count: 1, lines: 'main: test log line' };
+		const before = modals.length;
+		await v.handleLogsSection('main');
+		assert(modals.length === before + 1, 'modal opened');
+		assert(/test log line/.test(textOfList(modals[modals.length - 1].children)), 'log content');
+	});
+
+	/* --- account panel: cloudflare --- */
+	await t('account panel selects the first connection', function() {
+		v.updateStatus(makeStatus([ conn() ]));
+		v.accountSectionFor = null;
+		v.updateAccountSection();
+		assert(v.acctSel.childNodes.length >= 1, 'select populated');
+		assert(v.acctSel.value === 'main', 'select value: ' + v.acctSel.value);
+		assert(/WARP device ID/.test(textOf(v.acctBody)), 'summary shown');
+		assert(/device-1/.test(textOf(v.acctBody)), 'device id shown');
+	});
+
+	await t('generate without ToS only warns', async function() {
+		v.updateStatus(makeStatus([ conn({ config_exists: false, config_valid: false }) ]));
+		v.acctSel.value = 'main';
+		v.accountSectionFor = null;
+		v.updateAccountSection();
+		const before = notifications.length;
+		await v.handleGenerate();
+		assert(notifications.length === before + 1, 'notification');
+		assert(lastNotification().cls === 'warning' && /Terms of Service/.test(textOf(lastNotification().content)), 'ToS warning');
+	});
+
+	await t('generate with ToS starts registration and polls', async function() {
 		v.regTos.checked = true;
 		v.regNameInput.value = '  my router  ';
-		const notifBefore = notifications.length; /* notification only on completion */
-		await v.handleRegister();
-		assert(rpcCalls.some(function(c) { return c.method === 'register' && c.args[0] === 'my router' && c.args[1] === true; }), 'register rpc with trimmed name + accept_tos=true');
-		assert(v.registering === true, 'registration in progress');
-		assert(v.regBox.style.display === '', 'progress box visible');
-		assert(v.btnGenerate.disabled === true, 'button disabled while running');
+		const before = rpcCalls.length;
+		await v.handleGenerate();
+		const reg = rpcCalls.slice(before).filter(function(c) { return c.method === 'register'; })[0];
+		assert(reg, 'register rpc called');
+		assert(reg.args[0] === 'main' && reg.args[1] === 'my router' && reg.args[2] === true, 'register args');
+		assert(v.registering === 'main', 'registration in progress');
+		assert(v.regBox.style.display === '', 'progress visible');
 	});
 
-	await t('registerStatus progress renders elapsed + output', async function() {
-		registerStatusData = { ok: true, running: true, done: false, timed_out: false, rc: null, elapsed: 7, output: 'connecting...', config_exists: false };
+	await t('registerStatus progress and success', async function() {
+		registerStatusFixture = { ok: true, running: true, done: false, timed_out: false, rc: null,
+			elapsed: 7, output: 'connecting...', config_exists: false };
 		await pollFns[0]();
-		assert(/7s/.test(v.regText.textContent), 'elapsed text: ' + v.regText.textContent);
-		assert(v.regOutput.textContent === 'connecting...', 'output shown');
-	});
+		assert(/7s/.test(v.regText.textContent), 'elapsed: ' + v.regText.textContent);
 
-	await t('registerStatus done/rc=0 hides progress and notifies', async function() {
-		registerStatusData = { ok: true, running: false, done: true, timed_out: false, rc: 0, elapsed: 9, output: '', config_exists: true };
+		registerStatusFixture = { ok: true, running: false, done: true, timed_out: false, rc: 0,
+			elapsed: 9, output: '', config_exists: true };
+		statusFixture = makeStatus([ conn({ config_exists: true }) ]);
 		await pollFns[0]();
-		assert(v.registering === false, 'registration finished');
+		assert(v.registering === null, 'registration finished');
 		assert(v.regBox.style.display === 'none', 'progress hidden');
-		assert(notifications[notifications.length - 1].cls === 'success', 'success notification');
-		assert(v.btnGenerate.disabled === false, 'button re-enabled');
+		assert(lastNotification().cls === 'success', 'success notification');
 	});
 
-	await t('registerStatus failure keeps the output visible', async function() {
-		v.registering = true;
-		v.btnGenerate.disabled = true;
-		registerStatusData = { ok: true, running: false, done: true, timed_out: false, rc: 1, elapsed: 4, output: 'error: registration failed', config_exists: false };
-		await v.updateRegister(registerStatusData);
-		assert(v.registering === false, 'registration marked finished');
-		assert(v.regBox.style.display === '', 'progress box still visible');
-		assert(/exit code 1/.test(v.regText.textContent), 'failure text: ' + v.regText.textContent);
+	await t('failed registration keeps the output visible', async function() {
+		v.registering = 'main';
+		v.regT0 = Date.now();
+		registerStatusFixture = { ok: true, running: false, done: true, timed_out: false, rc: 1,
+			elapsed: 4, output: 'error: registration failed', config_exists: false };
+		await v.updateRegister('main', registerStatusFixture);
+		assert(v.registering === null, 'finished');
+		assert(v.regBox.style.display === '', 'progress still visible');
+		assert(/exit code 1/.test(v.regText.textContent), 'failure text');
 		assert(v.regOutput.textContent === 'error: registration failed', 'output kept');
 	});
 
-	/* --- re-register modal / delete modal --- */
-	await t('handleReRegister opens a modal', function() {
-		const before = modals.length;
-		v.handleReRegister();
-		assert(modals.length === before + 1, 'modal opened');
+	/* --- account panel: custom (import) --- */
+	await t('custom mode renders the JSON import panel', function() {
+		v.updateStatus(makeStatus([ conn({ section: 'cnt2', iface: 'warp9', mode: 'custom',
+			config_file: '/etc/usque/cnt2.json', config_exists: false }) ]));
+		v.acctSel.value = 'cnt2';
+		v.accountSectionFor = null;
+		v.updateAccountSection();
+		assert(/Custom endpoint/.test(textOf(v.acctBody)), 'custom hint');
+		assert(v.importArea, 'textarea exists');
 	});
 
-	await t('handleDeleteConfig opens a modal', function() {
-		const before = modals.length;
-		v.handleDeleteConfig();
-		assert(modals.length === before + 1, 'modal opened');
+	await t('import rejects empty / non-object payloads', async function() {
+		v.importArea.value = '';
+		let before = notifications.length;
+		await v.handleImport();
+		assert(notifications.length === before + 1 && lastNotification().cls === 'warning', 'empty warning');
+
+		v.importArea.value = '[]';
+		before = notifications.length;
+		await v.handleImport();
+		assert(notifications.length === before + 1 && /JSON object/.test(textOf(lastNotification().content)), 'object warning');
 	});
 
-	await t('handleDeleteConfig confirm path calls rpc', async function() {
-		statusData = baseStatus({ config_exists: false, config_valid: false });
+	await t('import calls importConfig for valid input', async function() {
+		v.importArea.value = '{"private_key":"x","ipv4":"172.16.0.9"}';
+		const before = rpcCalls.length;
+		await v.handleImport();
+		const imp = rpcCalls.slice(before).filter(function(c) { return c.method === 'importConfig'; })[0];
+		assert(imp && imp.args[0] === 'cnt2', 'import rpc');
+		assert(lastNotification().cls === 'success', 'success notification');
+	});
+
+	/* --- delete config --- */
+	await t('delete config shows a confirmation modal and calls the rpc', async function() {
+		v.updateStatus(makeStatus([ conn({ section: 'main' }) ]));
+		v.acctSel.value = 'main';
+		v.accountSectionFor = null;
+		v.updateAccountSection();
 		await v.handleDeleteConfig();
 		const modal = modals[modals.length - 1];
-		/* find the delete button in the modal tree */
-		let deleteBtn = null;
+		let btn = null;
 		(function walk(node) {
 			if (!node || !node.childNodes) return;
 			node.childNodes.forEach(function(c) {
-				if (isEl(c) && /Delete/.test(c.textContent) && typeof c.attributes.click === 'function')
-					deleteBtn = c;
+				if (isEl(c) && c.tagName === 'BUTTON' && /^Delete$/.test(String(c.textContent)) && typeof c.attributes.click === 'function')
+					btn = c;
 				walk(c);
 			});
 		})({ childNodes: modal.children });
-		assert(deleteBtn !== null, 'delete button found');
+		assert(btn, 'delete button found');
 		const before = rpcCalls.length;
-		await deleteBtn.attributes.click();
-		assert(rpcCalls.slice(before).some(function(c) { return c.method === 'deleteConfig'; }), 'deleteConfig rpc called');
+		await btn.attributes.click();
+		assert(rpcMethodsSince(before).indexOf('deleteConfig') !== -1, 'deleteConfig rpc');
 	});
 
-	/* --- service buttons --- */
-	await t('handleStart refuses when enabled=0 (init script would no-op)', async function() {
-		statusData = baseStatus({ enabled: false, running: false, pid: 0, uptime: 0, init_enabled: false });
-		v.updateStatus(statusData);
-		const beforeActions = initActions.length;
-		const beforeNotifs = notifications.length;
-		await v.handleStart();
-		assert(initActions.length === beforeActions, 'no init action issued');
-		assert(notifications.length === beforeNotifs + 1, 'warning notification');
-		assert(notifications[notifications.length - 1].cls === 'warning', 'warning class');
+	await t('fix permissions calls the rpc', async function() {
+		v.updateStatus(makeStatus([ conn({ config_secure: false, config_mode: '-rw-r--r--' }) ]));
+		v.acctSel.value = 'main';
+		v.accountSectionFor = null;
+		v.updateAccountSection();
+		const before = rpcCalls.length;
+		await v.handleFixPermissions();
+		assert(rpcMethodsSince(before).indexOf('fixConfigPermissions') !== -1, 'fix rpc');
 	});
 
-	await t('status note flags enabled-but-not-on-boot', function() {
-		v.updateStatus(baseStatus({ enabled: true, init_enabled: false, running: false, pid: 0 }));
-		assert(/boot/.test(v.elServiceNote.textContent), 'note: ' + v.elServiceNote.textContent);
-	});
-
-	await t('updateStatus keeps the latest status for handlers', function() {
-		v.updateStatus(baseStatus({ config_path: '/tmp/other.json' }));
-		assert(v.status.config_path === '/tmp/other.json', 'this.status updated');
-	});
-
-	await t('handleStart/handleRestart refuse without a WARP config', async function() {
-		statusData = baseStatus({ config_exists: false, config_valid: false });
-		v.updateStatus(statusData);
-		const beforeActions = initActions.length;
-		const beforeNotifs = notifications.length;
-		await v.handleStart();
-		await v.handleRestart();
-		assert(initActions.length === beforeActions, 'no init action issued');
-		assert(notifications.length === beforeNotifs + 2, 'two warnings');
-	});
-
-	await t('handleStart/handleStop/handleRestart call setInitAction', async function() {
-		statusData = baseStatus();
-		v.updateStatus(statusData);
-		await v.handleStart();
-		await v.handleStop();
-		await v.handleRestart();
-		assert(initActions.indexOf('start') !== -1 && initActions.indexOf('stop') !== -1 && initActions.indexOf('restart') !== -1,
-			'actions: ' + initActions.join(','));
-	});
-
-	/* --- diagnostics --- */
-	await t('handleTest renders a successful trace result', async function() {
-		statusData = baseStatus();
-		testData = { ok: true, warp: 'on', ip: '104.28.0.1', colo: 'VIE', loc: 'AT', gateway: 'off',
-			timestamp: '2026-01-01T00:00:00Z', method: 'curl --interface warp0', bound: true,
-			raw: 'warp=on\nip=104.28.0.1\n' };
-		await v.handleTest();
-		assert(v.lastTest && v.lastTest.warp === 'on', 'lastTest stored');
-		assert(v.testResult.childNodes.length > 0, 'result rendered');
-	});
-
-	await t('handleTest renders a failed test visibly', async function() {
-		testData = { ok: false, error: 'no connectivity' };
-		await v.handleTest();
-		const json = JSON.stringify(v.testResult, function(k, val) {
-			if (k === 'parent') return undefined;
-			return val;
-		});
-		assert(/no connectivity/.test(json), 'error message in result');
-		assert(v.lastTest.warp === 'on', 'previous good result kept');
-	});
-
-	await t('handleRefreshLogs updates the log viewer', async function() {
-		logsData = { ok: true, count: 1, lines: 'fresh log line' };
-		await v.handleRefreshLogs();
-		assert(v.logPre.textContent === 'fresh log line', 'log text updated');
-		assert(/1 entries/.test(v.logCount.textContent), 'count: ' + v.logCount.textContent);
+	/* --- remove connection --- */
+	await t('remove connection stops the instance, drops the section, commits', async function() {
+		const before = rpcCalls.length;
+		await v.handleRemoveConnection('cnt2');
+		const modal = modals[modals.length - 1];
+		let btn = null;
+		(function walk(node) {
+			if (!node || !node.childNodes) return;
+			node.childNodes.forEach(function(c) {
+				if (isEl(c) && c.tagName === 'BUTTON' && /^Remove$/.test(String(c.textContent)) && typeof c.attributes.click === 'function')
+					btn = c;
+				walk(c);
+			});
+		})({ childNodes: modal.children });
+		assert(btn, 'remove button found');
+		await btn.attributes.click();
+		const methods = rpcMethodsSince(before);
+		assert(methods.indexOf('setInitAction') !== -1, 'init action called');
+		assert(methods.indexOf('apply') !== -1, 'uci apply called');
+		assert(!uciSectionsFixture.some(function(s) { return s['.name'] === 'cnt2'; }), 'section removed');
 	});
 
 	/* --- save & apply --- */
-	await t('handleSaveApply commits uci, applies service state, clears badge', async function() {
-		uciStore['usque.main.enabled'] = '1';
-		statusData = baseStatus();
+	await t('save & apply commits, enables and restarts when a config exists', async function() {
+		uciSectionsFixture = [ { '.name': 'main', '.type': 'usque', enabled: '1' } ];
+		statusFixture = makeStatus([ conn() ]);
+		v.updateStatus(statusFixture);
+		initActions.length = 0;
 		const before = rpcCalls.length;
 		await v.handleSaveApply({});
-		const calls = rpcCalls.slice(before).map(function(c) { return c.object + '.' + c.method; });
-		assert(calls.indexOf('uci.apply') !== -1, 'uci.apply called: ' + calls.join(','));
-		assert(calls.indexOf('luci.usque.setInitAction') !== -1, 'setInitAction called');
-		assert(initActions.indexOf('enable') !== -1 && initActions.indexOf('restart') !== -1, 'enable+restart: ' + initActions.join(','));
-		assert(notifications[notifications.length - 1].cls === 'success', 'success notification');
+		const methods = rpcMethodsSince(before);
+		assert(methods.indexOf('apply') !== -1, 'uci apply');
+		assert(initActions.indexOf('enable') !== -1, 'enable');
+		assert(initActions.indexOf('restart') !== -1, 'restart');
+		assert(lastNotification().cls === 'success', 'success notification');
 	});
 
-	await t('handleSaveApply with enabled=0 stops and disables', async function() {
-		uciStore['usque.main.enabled'] = '0';
-		const before = initActions.length;
+	await t('save & apply disables and stops when no connection is enabled', async function() {
+		uciSectionsFixture = [ { '.name': 'main', '.type': 'usque', enabled: '0' } ];
+		initActions.length = 0;
 		await v.handleSaveApply({});
-		const newActions = initActions.slice(before);
-		assert(newActions.indexOf('disable') !== -1 && newActions.indexOf('stop') !== -1, 'disable+stop: ' + newActions.join(','));
+		assert(initActions.indexOf('disable') !== -1, 'disable');
+		assert(initActions.indexOf('stop') === -1, 'no per-section stop');
+		assert(initActions.indexOf('restart') === -1, 'no restart');
 	});
 
-	await t('handleSaveApply does not restart without a WARP config', async function() {
-		uciStore['usque.main.enabled'] = '1';
-		getConfigData = { ok: true, exists: false, valid: false };
-		const before = initActions.length;
+	await t('save & apply skips restart when an enabled connection has no config', async function() {
+		uciSectionsFixture = [ { '.name': 'main', '.type': 'usque', enabled: '1' } ];
+		statusFixture = makeStatus([ conn({ config_exists: false, config_valid: false }) ]);
+		v.updateStatus(statusFixture);
+		initActions.length = 0;
 		await v.handleSaveApply({});
-		getConfigData = { ok: true, exists: true };
-		const newActions = initActions.slice(before);
-		assert(newActions.indexOf('enable') !== -1, 'boot symlink still enabled: ' + newActions.join(','));
-		assert(newActions.indexOf('restart') === -1, 'no restart without config');
-		const notif = notifications[notifications.length - 1];
-		assert(notif.cls === 'warning', 'warning notification: ' + notif.cls);
-	});
-
-	await t('handleSaveApply surfaces backend errors', async function() {
-		uciStore['usque.main.enabled'] = '1';
-		const before = notifications.length;
-		const origStatus = statusData;
-		/* make setInitAction fail once */
-		const origRpc = rpc.declare;
-		rpc.declare = function(opts) {
-			const fn = origRpc(opts);
-			if (opts.method === 'setInitAction')
-				return function() { return Promise.resolve({ ok: false, error: 'init script missing' }); };
-			return fn;
-		};
-		const v2 = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
-		rpc.declare = origRpc;
-		const data2 = await v2.load();
-		await v2.render(data2);
-		await v2.handleSaveApply({});
-		const errs = notifications.slice(before).filter(function(n) { return n.cls === 'danger'; });
-		assert(errs.length >= 1, 'danger notification emitted');
-		statusData = origStatus;
+		assert(initActions.indexOf('enable') !== -1, 'enable');
+		assert(initActions.indexOf('restart') === -1, 'no restart');
+		assert(lastNotification().cls === 'warning', 'warning notification');
 	});
 
 	/* --- degraded backend --- */
-	await t('renders without a working backend (all rpc failing)', async function() {
-		const origRpc = rpc.declare;
+	await t('renders without a working backend', async function() {
+		const origDeclare = rpc.declare;
 		rpc.declare = function() { return function() { return Promise.reject(new Error('Access denied')); }; };
-		const v3 = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
-		rpc.declare = origRpc;
-		const data3 = await v3.load();
-		const root3 = await v3.render(data3);
-		assert(isEl(root3), 'page still renders');
-		assert(v3.elBackend.style.display === '', 'backend error banner visible');
+		const v2 = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
+		rpc.declare = origDeclare;
+		const data = await v2.load();
+		const r2 = await v2.render(data);
+		assert(isEl(r2), 'page renders');
+		assert(/No connections configured/.test(textOf(r2)), 'hint shown');
 	});
 
-	await t('renders when /etc/config/usque cannot be loaded', async function() {
-		const origRpc = rpc.declare;
-		rpc.declare = function(opts) {
-			if (opts.object === 'uci' && opts.method === 'apply') {
-				return function() { return Promise.resolve({}); };
-			}
-			return origRpc(opts);
-		};
+	await t('renders when /etc/config/usque cannot be read', async function() {
 		const origMap = form.Map;
 		form.Map = function() {
 			const m = new origMap();
 			m.render = function() { return Promise.reject(new Error('Not found')); };
 			return m;
 		};
-		statusData = baseStatus({ config_exists: false, config_valid: false });
-		const v4 = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
-		rpc.declare = origRpc;
-		const data4 = await v4.load();
-		const root4 = await v4.render(data4);
+		statusFixture = makeStatus([ conn() ]);
+		const v3 = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
+		const data = await v3.load();
+		const r3 = await v3.render(data);
 		form.Map = origMap;
-		assert(isEl(root4), 'fallback page rendered');
-		const json = JSON.stringify(root4, function(k, val) { return k === 'parent' ? undefined : val; });
-		assert(/Cannot load the usque configuration/.test(json), 'error section present');
+		assert(isEl(r3), 'fallback page rendered');
+		assert(/Cannot load the usque configuration/.test(textOf(r3)), 'error section');
 	});
 
 	if (failures > 0) {

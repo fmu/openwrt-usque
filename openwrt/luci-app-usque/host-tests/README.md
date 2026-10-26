@@ -14,8 +14,8 @@ There are two independent test scripts:
 
 | script | runs on | tests |
 | --- | --- | --- |
-| `smoke-test.js` | build host (Node.js) | the LuCI view `overview.js` |
-| `router-backend-test.sh` | the router (or via ssh) | the rpcd backend `luci.usque` |
+| `smoke-test.js` | build host (Node.js) | the LuCI view `overview.js` (multi-connection UI) |
+| `router-backend-test.sh` | the router (or via ssh) | the rpcd backend `luci.usque` (v2, 69 checks) |
 
 ## smoke-test.js — LuCI view (host, Node.js)
 
@@ -35,11 +35,13 @@ harness itself crashes.
 ## router-backend-test.sh — rpcd backend (on the router)
 
 This one exercises the real shell backend end-to-end on an OpenWrt 25.12 device
-(`sh`, `jshn`, `uci`, `ip`, `logread` are required). It is safe to run on a
-production router: it uses a **test copy** of the backend pointed at
-`/etc/usque/test-warp0.json` plus a fake `usque` binary and a fake init script
-via the `USQUE_BIN` / `INIT_SCRIPT` environment overrides, so the real
-configuration, the real binary and `/etc/init.d/usque` are never touched.
+(`sh`, `jshn`, `ip`, `logread`, `curl` are required). It is safe to run on a
+production router: the backend is driven with a **fake `uci`** (via `PATH`), a
+fake `usque` binary (`USQUE_BIN`) and a fake init script (`INIT_SCRIPT`), so the
+real `/etc/config/usque`, `/etc/usque/warp0.json` and `/etc/init.d/usque` are
+never touched. It creates `/etc/usque/test-warp0.json` and
+`/etc/usque/test-custom.json`, removes them at the end and writes one syslog
+line to test the per-connection log filter.
 
 ```sh
 # from the repository root
@@ -47,14 +49,18 @@ ssh root@<router> 'cat > /tmp/luci.usque.src' < openwrt/luci-app-usque/root/usr/
 ssh root@<router> 'sh -s' < openwrt/luci-app-usque/host-tests/router-backend-test.sh
 ```
 
-Covers: method listing, ToS enforcement, device-name validation, asynchronous
-registration + `registerStatus` polling, rc/watchdog handling, secret redaction,
-`/etc/config` permission fix, config deletion, `setInitAction`, egress test
-parsing, logs, unknown methods and malformed JSON input. Exit code `0` = pass.
+Covers (69 checks): multi-section `status` (per-connection UCI/config/interface/
+route state + globals), `getConfig`, ToS/device-name validation, asynchronous
+per-section registration + `registerStatus` polling, secret redaction, custom
+mode JSON import validation and atomic chmod-600 write, per-section
+`setInitAction` (including the section argument), egress test parsing, per-
+connection log filtering, permission fix, config deletion (including the
+`/etc/usque` path guard), LAN IPv6 globals, unknown methods/sections and
+malformed JSON input. Exit code `0` = pass.
 
 ## What `smoke-test.js` covers
 
-* module factory contract (`view.extend`, `load()`, `render()`),
+* module factory contract and LuCI `require` header parsing, (`view.extend`, `load()`, `render()`),
 * `render()` builds the status / account / configuration / diagnostics sections,
 * `poll` registration and the status refresh path (running, stopped, missing
   config, insecure config permissions),

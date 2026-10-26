@@ -987,7 +987,7 @@ return view.extend({
 						'click': function() {
 							ui.hideModal();
 							var config_name = self.map.config;
-							L.resolveDefault(callSetInitAction('stop', sid), null).then(function() {
+							return L.resolveDefault(callSetInitAction('stop', sid), null).then(function() {
 								self.map.data.remove(config_name, sid);
 								return self.map.save(null, true);
 							}).then(function() {
@@ -1058,7 +1058,7 @@ return view.extend({
 								return;
 							}
 							ui.hideModal();
-							self.beginRegistration(sid, (nameInput.value || '').trim());
+							return self.beginRegistration(sid, (nameInput.value || '').trim());
 						}
 					}, _('Re-register'))
 				])
@@ -1108,7 +1108,7 @@ return view.extend({
 						'class': 'cbi-button cbi-button-negative important',
 						'click': function() {
 							ui.hideModal();
-							L.resolveDefault(callDeleteConfig(sid), null).then(function(res) {
+							return L.resolveDefault(callDeleteConfig(sid), null).then(function(res) {
 								if (!res || res.ok !== true)
 									ui.addNotification(_('Delete failed'), E('p', {}, errText(res)), 'danger');
 								else
