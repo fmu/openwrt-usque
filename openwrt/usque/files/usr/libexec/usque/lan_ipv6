@@ -1,0 +1,104 @@
+#!/bin/sh
+# usque LAN IPv6 helper (v2, optional; enabled by settings.lan_ipv6)
+#
+# Gives LAN clients IPv6 through the tunnel without requiring a native IPv6
+# uplink (NAT66):
+#   - ensures a ULA prefix exists (network.globals.ula_prefix), derived from
+#     the LAN MAC address unless settings.lan_ipv6_prefix is set,
+#   - ensures the LAN interface is assigned an IPv6 prefix (ip6assign) when
+#     neither ip6assign nor ip6addr is configured,
+#   - enables the RA/DHCPv6 server on the LAN (dhcp.lan.ra=server),
+#   - the usque firewall zone already has masq6=1 and lan forwarding (see
+#     /usr/libexec/usque/firewall).
+#
+# Only missing settings are added; existing configuration is never replaced.
+# Disabling settings.lan_ipv6 leaves everything in place (non-destructive, by
+# design): remove the options manually to revert.
+#
+# Usage: lan_ipv6 setup [<prefix>]
+
+log() { logger -t usque "lan_ipv6: $*"; }
+
+lan_device() {
+	local dev
+	dev="$(uci -q get network.lan.device 2>/dev/null)"
+	[ -n "$dev" ] || dev="$(uci -q get network.lan.ifname 2>/dev/null)"
+	[ -n "$dev" ] || dev="br-lan"
+	printf '%s' "${dev%% *}"
+}
+
+# Derive a stable ULA /48 from the LAN MAC: fd | (mac0 with local bit set) |
+# mac1 mac2 | mac3 mac4 ::/48
+derive_ula() {
+	local dev mac hex b0 b1 b2 b3 b4 n
+	dev="$(lan_device)"
+	mac="$(cat "/sys/class/net/$dev/address" 2>/dev/null)"
+	[ -n "$mac" ] || return 1
+	hex="$(printf '%s' "$mac" | tr -d ':' | tr 'A-F' 'a-f')"
+	[ ${#hex} -eq 12 ] || return 1
+	b0="$(printf '%s' "$hex" | cut -c1-2)"
+	b1="$(printf '%s' "$hex" | cut -c3-4)"
+	b2="$(printf '%s' "$hex" | cut -c5-6)"
+	b3="$(printf '%s' "$hex" | cut -c7-8)"
+	b4="$(printf '%s' "$hex" | cut -c9-10)"
+	n=$((0x$b0))
+	n=$(( (n | 0x02) & 0xfd ))
+	printf 'fd%02x:%s%s:%s%s::/48\n' "$n" "$b1" "$b2" "$b3" "$b4"
+}
+
+setup() {
+	local prefix="$1" ula cur changed=0
+
+	if ! command -v uci >/dev/null 2>&1; then
+		log "uci not found, cannot configure LAN IPv6"
+		return 1
+	fi
+
+	ula="$(uci -q get network.globals.ula_prefix 2>/dev/null)"
+	if [ -z "$ula" ]; then
+		if [ -n "$prefix" ]; then
+			ula="$prefix"
+		else
+			ula="$(derive_ula)" || { log "cannot derive ULA prefix (no LAN MAC)"; return 1; }
+		fi
+		uci set "network.globals.ula_prefix=$ula"
+		log "set network.globals.ula_prefix=$ula"
+		changed=1
+	fi
+
+	if [ -z "$(uci -q get network.lan.ip6assign 2>/dev/null)" ] && \
+	   [ -z "$(uci -q get network.lan.ip6addr 2>/dev/null)" ]; then
+		uci set network.lan.ip6assign='60'
+		log "set network.lan.ip6assign=60 (ULA $ula)"
+		changed=1
+	fi
+
+	case "$(uci -q get dhcp.lan.ra 2>/dev/null)" in
+		server|hybrid|relay) ;;
+		*)
+			uci set dhcp.lan.ra='server'
+			uci set dhcp.lan.dhcpv6='server'
+			log "enabled RA/DHCPv6 server on lan"
+			changed=1
+			;;
+	esac
+
+	if [ "$changed" = 1 ]; then
+		uci commit network
+		uci commit dhcp
+		if [ -x /sbin/reload_config ]; then
+			/sbin/reload_config >/dev/null 2>&1 || log "reload_config failed"
+		fi
+		log "LAN IPv6 configured (ULA $ula, masq6 via firewall zone)"
+	else
+		log "LAN IPv6 already configured"
+	fi
+	return 0
+}
+
+case "$1" in
+	setup) shift; setup "$@" ;;
+	*)     echo "usage: $0 setup [<ula-prefix>]" >&2; exit 1 ;;
+esac
+
+exit 0

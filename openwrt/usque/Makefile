@@ -14,7 +14,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=usque
-PKG_VERSION:=0.1.0
+PKG_VERSION:=0.2.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -70,6 +70,7 @@ define Package/usque/install
 	$(INSTALL_DIR) $(1)/usr/libexec/usque
 	$(INSTALL_BIN) ./files/usr/libexec/usque/hook $(1)/usr/libexec/usque/hook
 	$(INSTALL_BIN) ./files/usr/libexec/usque/firewall $(1)/usr/libexec/usque/firewall
+	$(INSTALL_BIN) ./files/usr/libexec/usque/lan_ipv6 $(1)/usr/libexec/usque/lan_ipv6
 endef
 
 define Package/usque/postinst
@@ -77,7 +78,7 @@ define Package/usque/postinst
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 mkdir -p /etc/usque
 chmod 700 /etc/usque 2>/dev/null
-logger -t usque "installed: configure /etc/config/usque, then '/etc/init.d/usque enable && /etc/init.d/usque start'"
+logger -t usque "installed: configure /etc/config/usque (default: routing untouched), then '/etc/init.d/usque enable && /etc/init.d/usque start'"
 if /etc/init.d/usque enabled 2>/dev/null; then
 	/etc/init.d/usque restart >/dev/null 2>&1 || true
 fi

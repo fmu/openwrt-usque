@@ -1,18 +1,18 @@
 #!/bin/sh
-# usque firewall zone helper
+# usque firewall zone helper (v2: multiple tunnel interfaces, optional LAN IPv6)
 #
-# Creates/updates a dedicated fw4 zone for the WARP tunnel interface and
-# removes it again when the package is uninstalled:
+# Creates/updates a dedicated fw4 zone for all enabled usque tunnel
+# interfaces and removes it again when the package is uninstalled:
 #
-#   firewall.usque       zone: name usque, device <iface>, input REJECT,
+#   firewall.usque       zone: name usque, device list <ifaces>, input REJECT,
 #                              output ACCEPT, forward REJECT, masq, masq6,
 #                              mtu_fix
 #   firewall.usque_<z>   forwarding <z> -> usque for every internal zone <z>
 #                        that forwards to wan (lan, guest, ...); lan is always
 #                        included.
 #
-# Usage: firewall setup [iface]   (idempotent; reloads fw4 only on changes)
-#        firewall teardown        (idempotent)
+# Usage: firewall setup <iface> [<iface> ...]   (idempotent)
+#        firewall teardown                       (idempotent)
 #
 # The existing WAN zone is never touched.
 
@@ -28,9 +28,6 @@ fw4_reload() {
 		log "fw4 not found, firewall changes will apply on next reload"
 	fi
 }
-
-zone_get() { uci -q get "firewall.$ZONE.$1" 2>/dev/null; }
-zone_set() { uci set "firewall.$ZONE.$1=$2" && changed=1; }
 
 # Names of zones that have a forwarding rule to wan (one per line).
 wan_forward_sources() {
@@ -61,8 +58,33 @@ internal_zones() {
 	done | sort -u
 }
 
+# Current device list of the zone, one per line.
+zone_devices() {
+	uci -q get "firewall.$ZONE.device" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sort -u
+}
+
+set_zone_devices() {
+	local dev
+	uci -q delete "firewall.$ZONE.device"
+	for dev in "$@"; do
+		uci add_list "firewall.$ZONE.device=$dev"
+	done
+	changed=1
+}
+
 setup() {
-	local iface="${1:-warp0}" src fwd
+	local iface src fwd want current
+
+	[ "$#" -gt 0 ] || { log "no tunnel interfaces, nothing to do"; return 0; }
+	# De-duplicate the interface list.
+	want=""
+	for iface in "$@"; do
+		case " $want " in
+			*" $iface "*) ;;
+			*) want="$want $iface" ;;
+		esac
+	done
+	want="${want# }"
 
 	if ! uci -q get "firewall.$ZONE" >/dev/null 2>&1; then
 		uci set "firewall.$ZONE=zone"
@@ -73,15 +95,18 @@ setup() {
 		uci set "firewall.$ZONE.masq=1"
 		uci set "firewall.$ZONE.masq6=1"
 		uci set "firewall.$ZONE.mtu_fix=1"
-		uci set "firewall.$ZONE.device=$iface"
+		set_zone_devices $want
 		changed=1
+	else
+		current="$(zone_devices | tr '\n' ' ' | sed 's/ *$//')"
+		if [ "$current" != "$want" ]; then
+			set_zone_devices $want
+		fi
 	fi
-
-	[ "$(zone_get device)" = "$iface" ] || zone_set device "$iface"
 
 	# Every internal zone that may forward to the internet must be allowed
 	# to forward into the tunnel as well, otherwise LAN/guest clients lose
-	# internet access while the tunnel is up.
+	# internet access while a tunnel default route is active.
 	for src in $(internal_zones); do
 		fwd="${ZONE}_${src}"
 		if ! uci -q get "firewall.$fwd" >/dev/null 2>&1; then
@@ -95,17 +120,16 @@ setup() {
 
 	if [ "$changed" = 1 ]; then
 		uci commit firewall
-		log "zone '$ZONE' (device $iface) configured"
+		log "zone '$ZONE' (devices: $want) configured"
 		fw4_reload
 	else
-		log "zone '$ZONE' (device $iface) already configured"
+		log "zone '$ZONE' (devices: $want) already configured"
 	fi
 }
 
 teardown() {
 	local sec
 
-	# Remove all forwarding sections we created (firewall.usque_*).
 	for sec in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(${ZONE}_[A-Za-z0-9_]*\)=.*/\1/p"); do
 		uci delete "firewall.$sec" && changed=1
 	done
@@ -125,7 +149,7 @@ teardown() {
 case "$1" in
 	setup)    shift; setup "$@" ;;
 	teardown) teardown ;;
-	*)        echo "usage: $0 setup [iface] | teardown" >&2; exit 1 ;;
+	*)        echo "usage: $0 setup <iface> [<iface> ...] | teardown" >&2; exit 1 ;;
 esac
 
 exit 0

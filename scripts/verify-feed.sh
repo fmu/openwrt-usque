@@ -68,7 +68,7 @@ assert usque.get("arch") == sys.argv[2], \
     "usque arch %r != %r" % (usque.get("arch"), sys.argv[2])
 assert "kmod-tun" in depnames(usque), \
     "usque does not depend on kmod-tun: %r" % depnames(usque)
-assert str(usque.get("version", "")).startswith("0.1.0"), usque.get("version")
+assert str(usque.get("version", "")).startswith("0.2.0"), usque.get("version")
 
 assert "luci-app-usque" in by_name, "luci-app-usque missing from index"
 luci = by_name["luci-app-usque"]
@@ -157,6 +157,7 @@ log "Installed files"
 [ -f "$ROOT/etc/config/usque" ] || die "installed root is missing /etc/config/usque"
 [ -x "$ROOT/usr/libexec/usque/hook" ] || die "installed root is missing /usr/libexec/usque/hook"
 [ -x "$ROOT/usr/libexec/usque/firewall" ] || die "installed root is missing /usr/libexec/usque/firewall"
+[ -x "$ROOT/usr/libexec/usque/lan_ipv6" ] || die "installed root is missing /usr/libexec/usque/lan_ipv6"
 [ -f "$ROOT/www/luci-static/resources/view/usque/overview.js" ] || die "installed root is missing the LuCI view"
 [ -f "$ROOT/usr/share/luci/menu.d/luci-app-usque.json" ] || die "installed root is missing the LuCI menu entry"
 [ -f "$ROOT/usr/share/rpcd/acl.d/luci-app-usque.json" ] || die "installed root is missing the LuCI ACL"

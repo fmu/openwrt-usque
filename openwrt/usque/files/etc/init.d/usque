@@ -1,8 +1,15 @@
 #!/bin/sh /etc/rc.common
-# usque procd init script
+# usque procd init script (v2: multiple connections)
 #
-# UCI configuration: /etc/config/usque, section type "usque" named "main"
-# (i.e. usque.main.*), see /etc/config/usque for the available options.
+# UCI configuration: /etc/config/usque
+#   config settings 'settings'   global options (lan_ipv6, lan_ipv6_prefix)
+#   config usque '<sid>'         one section per tunnel connection; each
+#                                section is started as its own procd instance
+#                                (instance name = section name).
+#
+# Usage:
+#   /etc/init.d/usque start|stop|restart|reload|enable|disable [<sid>]
+# With a section name only that section is started/stopped.
 
 START=95
 STOP=10
@@ -11,23 +18,10 @@ USE_PROCD=1
 PROG=/usr/bin/usque
 HOOK=/usr/libexec/usque/hook
 FIREWALL=/usr/libexec/usque/firewall
-STATE_DIR=/var/run/usque
+LAN_IPV6=/usr/libexec/usque/lan_ipv6
+STATE_ROOT=/var/run/usque
 
 log() { logger -t usque "$*"; }
-
-load_config() {
-	config_load usque
-	config_get_bool enabled main enabled 0
-	config_get config_file main config_file /etc/usque/warp0.json
-	config_get interface main interface warp0
-	config_get mtu main mtu 1400
-	config_get_bool ipv6 main ipv6 0
-	config_get endpoint_port main endpoint_port 443
-	config_get_bool always_reconnect main always_reconnect 1
-	config_get_bool auto_register main auto_register 1
-	config_get device_name main device_name ''
-	config_get log_level main log_level info
-}
 
 valid_iface() {
 	case "$1" in
@@ -36,17 +30,65 @@ valid_iface() {
 	[ ${#1} -le 15 ]
 }
 
-# Register a new WARP device if the config file is missing.
+load_settings() {
+	config_load usque
+	config_get_bool lan_ipv6 settings lan_ipv6 0
+	config_get lan_ipv6_prefix settings lan_ipv6_prefix ''
+}
+
+# Load all per-section options into the local s_* variables of the calling
+# function.  Returns 1 if the section is disabled or misconfigured.
+section_options() {
+	local sid="$1"
+	config_get_bool s_enabled "$sid" enabled 0
+	config_get s_mode "$sid" mode cloudflare
+	config_get s_config_file "$sid" config_file "/etc/usque/$sid.json"
+	config_get s_interface "$sid" interface warp0
+	config_get s_mtu "$sid" mtu 1400
+	config_get_bool s_ipv6 "$sid" ipv6 1
+	config_get_bool s_endpoint_ipv6 "$sid" endpoint_ipv6 0
+	config_get s_ipv6_route "$sid" ipv6_route auto
+	config_get_bool s_default_route "$sid" default_route 0
+	config_get s_metric "$sid" metric 0
+	config_get s_endpoint_port "$sid" endpoint_port 443
+	config_get_bool s_always_reconnect "$sid" always_reconnect 1
+	config_get_bool s_auto_register "$sid" auto_register 1
+	config_get s_device_name "$sid" device_name ''
+	config_get s_log_level "$sid" log_level info
+	config_get s_sni "$sid" sni ''
+
+	[ "$s_enabled" = 1 ] || return 1
+
+	case "$s_mode" in
+		cloudflare|custom) ;;
+		*) log "$sid: invalid mode '$s_mode'"; return 1 ;;
+	esac
+	valid_iface "$s_interface" || { log "$sid: invalid interface name '$s_interface'"; return 1; }
+	case "$s_mtu" in ''|*[!0-9]*) log "$sid: invalid mtu '$s_mtu'"; return 1 ;; esac
+	case "$s_metric" in ''|*[!0-9]*) log "$sid: invalid metric '$s_metric'"; return 1 ;; esac
+	case "$s_endpoint_port" in ''|*[!0-9]*) log "$sid: invalid endpoint_port '$s_endpoint_port'"; return 1 ;; esac
+	case "$s_ipv6_route" in
+		auto|always|off) ;;
+		*) log "$sid: invalid ipv6_route '$s_ipv6_route'"; return 1 ;;
+	esac
+	[ "$s_ipv6" = 1 ] || s_ipv6_route=off
+	return 0
+}
+
+# Register a new WARP device for cloudflare-mode sections when the config file
+# is missing.  Custom-mode config files are always user supplied.
 ensure_config() {
-	[ -s "$config_file" ] && return 0
-	if [ "$auto_register" != 1 ]; then
-		log "config file '$config_file' missing and auto_register=0; not starting"
+	local sid="$1" rc
+	[ "$s_mode" = cloudflare ] || return 0
+	[ -s "$s_config_file" ] && return 0
+	if [ "$s_auto_register" != 1 ]; then
+		log "$sid: config file '$s_config_file' missing and auto_register=0; not starting"
 		return 1
 	fi
-	log "config file '$config_file' missing, registering a new WARP device"
-	mkdir -p "$(dirname "$config_file")" || return 1
-	set -- --config "$config_file" register --accept-tos --force
-	[ -n "$device_name" ] && set -- "$@" -n "$device_name"
+	log "$sid: config file '$s_config_file' missing, registering a new WARP device"
+	mkdir -p "$(dirname "$s_config_file")" || return 1
+	set -- --config "$s_config_file" register --accept-tos --force
+	[ -n "$s_device_name" ] && set -- "$@" -n "$s_device_name"
 	if command -v timeout >/dev/null 2>&1; then
 		timeout 90 "$PROG" "$@"
 		rc=$?
@@ -54,90 +96,130 @@ ensure_config() {
 		"$PROG" "$@"
 		rc=$?
 	fi
-	if [ "$rc" -ne 0 ] || [ ! -s "$config_file" ]; then
-		log "WARP registration failed (rc=$rc); not starting"
+	if [ "$rc" -ne 0 ] || [ ! -s "$s_config_file" ]; then
+		log "$sid: WARP registration failed (rc=$rc); not starting"
 		return 1
 	fi
-	chmod 600 "$config_file"
-	log "WARP registration succeeded"
+	chmod 600 "$s_config_file"
+	log "$sid: WARP registration succeeded"
 	return 0
 }
 
-start_service() {
-	load_config
+start_instance() {
+	local sid="$1" only="$2"
+	[ -z "$only" ] || [ "$only" = "$sid" ] || return 0
+	section_options "$sid" || return 0
+	[ -x "$PROG" ] || { log "$sid: missing $PROG"; return 1; }
 
-	if [ "$enabled" != 1 ]; then
-		log "service disabled (usque.main.enabled=0)"
-		return 0
-	fi
-	valid_iface "$interface" || { log "invalid interface name '$interface'"; return 1; }
-	case "$mtu" in ''|*[!0-9]*) log "invalid mtu '$mtu'"; return 1 ;; esac
-	case "$endpoint_port" in ''|*[!0-9]*) log "invalid endpoint_port '$endpoint_port'"; return 1 ;; esac
-	[ -x "$PROG" ] || { log "missing $PROG"; return 1; }
+	mkdir -p "$STATE_ROOT/$sid"
+	ensure_config "$sid" || return 0
 
-	mkdir -p "$STATE_DIR"
-	ensure_config || return 0
-
-	# Create/refresh the dedicated firewall zone before the tunnel comes up.
-	if [ -x "$FIREWALL" ]; then
-		"$FIREWALL" setup "$interface" >/dev/null 2>&1 || log "firewall zone setup failed"
-	fi
-
-	procd_open_instance usque
-	procd_set_param command "$PROG" --config "$config_file" native-tun \
-		-n "$interface" -m "$mtu" -P "$endpoint_port" \
+	procd_open_instance "$sid"
+	procd_set_param command "$PROG" --config "$s_config_file" native-tun \
+		-n "$s_interface" -m "$s_mtu" -P "$s_endpoint_port" \
 		--on-connect "$HOOK" --on-disconnect "$HOOK"
-	[ "$ipv6" = 1 ] && procd_append_param command --ipv6
-	[ "$always_reconnect" = 1 ] && procd_append_param command --always-reconnect
+	# NOTE: in usque-cli `--ipv6` selects the IPv6 *endpoint* family; the
+	# tunnel IPv6 address is configured by default and disabled with
+	# --no-tunnel-ipv6.  Do not map the `ipv6` UCI option to --ipv6.
+	[ "$s_ipv6" = 1 ] || procd_append_param command --no-tunnel-ipv6
+	[ "$s_endpoint_ipv6" = 1 ] && procd_append_param command --ipv6
+	[ "$s_always_reconnect" = 1 ] && procd_append_param command --always-reconnect
+	[ -n "$s_sni" ] && procd_append_param command -s "$s_sni"
 	procd_set_param env \
 		PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-		RUST_LOG="$log_level" \
-		USQUE_IPV6_ENABLED="$ipv6" \
-		USQUE_STATE_DIR="$STATE_DIR"
+		RUST_LOG="$s_log_level" \
+		USQUE_SECTION="$sid" \
+		USQUE_STATE_ROOT="$STATE_ROOT" \
+		USQUE_STATE_DIR="$STATE_ROOT/$sid" \
+		USQUE_IPV6_ENABLED="$s_ipv6" \
+		USQUE_IPV6_ROUTE="$s_ipv6_route" \
+		USQUE_DEFAULT_ROUTE="$s_default_route" \
+		USQUE_METRIC="$s_metric"
 	# Do not hammer Cloudflare: at most 5 restarts, 10s apart, within 1h.
 	procd_set_param respawn 3600 10 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_close_instance
 
-	log "started: iface=$interface mtu=$mtu ipv6=$ipv6 endpoint_port=$endpoint_port"
+	log "$sid: started (iface=$s_interface mode=$s_mode ipv6=$s_ipv6 ipv6_route=$s_ipv6_route default_route=$s_default_route metric=$s_metric)"
 }
 
-stop_service() {
-	load_config
-	mkdir -p "$STATE_DIR"
+stop_instance() {
+	local sid="$1" only="$2"
+	[ -z "$only" ] || [ "$only" = "$sid" ] || return 0
+	section_options "$sid" || return 0
 
 	# procd has already terminated the daemon, so its disconnect hook may not
-	# have run: clean up routes explicitly (idempotent, restores WAN default).
+	# have run: clean up routes/rules explicitly (idempotent).
 	if [ -x "$HOOK" ]; then
 		USQUE_EVENT=disconnect \
-		USQUE_IFACE="$interface" \
+		USQUE_IFACE="$s_interface" \
 		USQUE_ENDPOINT='' \
-		USQUE_IPV6_ENABLED="$ipv6" \
-		USQUE_STATE_DIR="$STATE_DIR" \
+		USQUE_SECTION="$sid" \
+		USQUE_STATE_ROOT="$STATE_ROOT" \
+		USQUE_STATE_DIR="$STATE_ROOT/$sid" \
+		USQUE_IPV6_ENABLED="$s_ipv6" \
+		USQUE_IPV6_ROUTE="$s_ipv6_route" \
+		USQUE_DEFAULT_ROUTE="$s_default_route" \
+		USQUE_METRIC="$s_metric" \
 		"$HOOK" >/dev/null 2>&1 || true
 	fi
 
 	# Fallback in case the hook was missing or failed.
-	ip route del default dev "$interface" metric 0 >/dev/null 2>&1 || true
-	ip -6 route del default dev "$interface" metric 0 >/dev/null 2>&1 || true
-	# Remove the policy-routing override (mwan3) if the hook left it behind.
-	if [ -f "$STATE_DIR/iprules" ]; then
-		while read -r fam prio; do
-			[ -n "$fam" ] && [ -n "$prio" ] || continue
-			if [ "$fam" = 6 ]; then
-				ip -6 rule del priority "$prio" >/dev/null 2>&1 || true
-			else
-				ip rule del priority "$prio" >/dev/null 2>&1 || true
-			fi
-		done < "$STATE_DIR/iprules"
-		rm -f "$STATE_DIR/iprules"
+	if [ "$s_default_route" = 1 ]; then
+		ip route del default dev "$s_interface" metric "$s_metric" >/dev/null 2>&1 || true
+	fi
+	if [ "$s_ipv6" = 1 ] && [ "$s_ipv6_route" != off ]; then
+		ip -6 route del default dev "$s_interface" metric "$s_metric" >/dev/null 2>&1 || true
 	fi
 
-	log "stopped"
+	log "$sid: stopped"
+}
+
+echo_iface() {
+	local sid="$1"
+	section_options "$sid" || return 0
+	printf '%s ' "$s_interface"
+}
+
+enabled_ifaces() {
+	config_load usque
+	config_foreach echo_iface usque
+}
+
+start_service() {
+	local only="$1" ifaces
+	load_settings
+	mkdir -p "$STATE_ROOT/shared"
+	config_load usque
+	config_foreach start_instance usque "$only"
+
+	# Firewall zone covering every enabled tunnel interface.
+	if [ -x "$FIREWALL" ]; then
+		ifaces="$(enabled_ifaces)"
+		if [ -n "$ifaces" ]; then
+			"$FIREWALL" setup $ifaces >/dev/null 2>&1 || log "firewall zone setup failed"
+		fi
+	fi
+
+	# Optional LAN IPv6 (ULA + RA + NAT66 through the tunnel).
+	if [ "$lan_ipv6" = 1 ] && [ -x "$LAN_IPV6" ]; then
+		"$LAN_IPV6" setup "$lan_ipv6_prefix" >/dev/null 2>&1 || log "LAN IPv6 setup failed"
+	fi
+}
+
+stop_service() {
+	local only="$1"
+	load_settings
+	config_load usque
+	config_foreach stop_instance usque "$only"
 }
 
 reload_service() {
-	stop
-	start
+	stop "$@"
+	start "$@"
+}
+
+service_triggers() {
+	procd_add_reload_trigger usque
 }

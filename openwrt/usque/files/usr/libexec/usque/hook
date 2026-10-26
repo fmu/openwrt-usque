@@ -1,54 +1,63 @@
 #!/bin/sh
-# usque routing hook
+# usque routing hook (v2: multiple connections, opt-in routing)
 #
-# Invoked by the usque daemon with the following environment:
-#   USQUE_EVENT    connect | disconnect
-#   USQUE_IFACE    tunnel interface name (e.g. warp0)
-#   USQUE_IPV4     tunnel IPv4 address
-#   USQUE_IPV6     tunnel IPv6 address
-#   USQUE_ENDPOINT WARP endpoint as ip:port or [ipv6]:port
-# and by /etc/init.d/usque stop (USQUE_EVENT=disconnect).
+# Invoked by the usque daemon on connect/disconnect with:
+#   USQUE_EVENT         connect | disconnect
+#   USQUE_IFACE         tunnel interface name
+#   USQUE_IPV4/_IPV6    tunnel addresses
+#   USQUE_ENDPOINT      WARP endpoint as ip:port or [ipv6]:port
+# and by the init script with the per-section routing options:
+#   USQUE_SECTION       UCI section name (instance / state owner)
+#   USQUE_STATE_ROOT    shared state directory (/var/run/usque)
+#   USQUE_STATE_DIR     per-section state directory
+#   USQUE_DEFAULT_ROUTE 1 = install an IPv4 default route via the tunnel
+#   USQUE_IPV6_ROUTE    auto | always | off  (install an IPv6 default route)
+#   USQUE_IPV6_ENABLED  1 = the daemon runs with IPv6 enabled
+#   USQUE_METRIC        route metric
 #
-# On connect:
-#   1. remember the current (WAN) default routes so they can be restored,
-#   2. install a host route for the WARP endpoint via the current WAN,
-#   3. install "default dev <iface> metric 0" for IPv4 (and IPv6 if enabled),
-#   4. install "ip rule priority 1000 from all lookup main" (and -6) so that
-#      policy routing (mwan3, VPN policy rules) cannot divert traffic away
-#      from the main table, where the tunnel default route lives.
-# On disconnect:
-#   1. remove the priority-1000 policy rules,
-#   2. remove the endpoint host route(s),
-#   3. remove the tunnel default route(s),
-#   4. restore the saved WAN default route(s) if none is left.
+# IMPORTANT: by default (default_route=0 and ipv6_route=auto with an existing
+# native IPv6 default) this script makes NO routing changes at all.
 #
-# The script is intentionally idempotent and never uses "set -e": a failure
-# must not leave the router without a default route (SSH would break).
+# When routing is requested it:
+#   - installs an endpoint bypass route via the current WAN for the address
+#     family whose default route is being changed,
+#   - installs "default dev <iface> metric <metric>" for that family,
+#   - installs "ip rule priority 1000 from all lookup main" (per family) so
+#     policy routing (mwan3) cannot divert traffic away from the main table.
+# Ownership is ref-counted across sections; WAN defaults are saved once and
+# restored when the last owning section disconnects.  The WAN default route is
+# never removed while the tunnel is up (failover stays automatic).
 
-STATE_DIR="${USQUE_STATE_DIR:-/var/run/usque}"
+STATE_ROOT="${USQUE_STATE_ROOT:-/var/run/usque}"
+SECTION="${USQUE_SECTION:-default}"
+STATE_DIR="${USQUE_STATE_DIR:-$STATE_ROOT/$SECTION}"
+SHARED="$STATE_ROOT/shared"
 LOG_TAG=usque
 RETRIES=5
 POLICY_PRIO=1000
-POLICY_STATE="$STATE_DIR/iprules"
 
-log() { logger -t "$LOG_TAG" "hook: $*"; }
+log() { logger -t "$LOG_TAG" "$SECTION: hook: $*"; }
 
-mkdir -p "$STATE_DIR" 2>/dev/null
+mkdir -p "$STATE_DIR" "$SHARED" 2>/dev/null
 
 IFACE="${USQUE_IFACE:-}"
 EVENT="${USQUE_EVENT:-}"
 ENDPOINT="${USQUE_ENDPOINT:-}"
-IPV6_ENABLED="${USQUE_IPV6_ENABLED:-}"
+IPV6_ENABLED="${USQUE_IPV6_ENABLED:-0}"
+IPV6_ROUTE="${USQUE_IPV6_ROUTE:-auto}"
+DEFAULT_ROUTE="${USQUE_DEFAULT_ROUTE:-0}"
+METRIC="${USQUE_METRIC:-0}"
+case "$METRIC" in ''|*[!0-9]*) METRIC=0 ;; esac
 
 [ -n "$IFACE" ] || { log "USQUE_IFACE not set, nothing to do"; exit 0; }
 case "$IFACE" in
 	*[!A-Za-z0-9_.-]*) log "invalid interface name '$IFACE', refusing"; exit 0 ;;
 esac
 
-# --- helpers ---------------------------------------------------------------
+# --- basic helpers ---------------------------------------------------------
 
-# Run an ip command for the given address family.  IPv4 uses the plain
-# commands (no -4 flag) for maximum busybox compatibility.
+# Run an ip command for an address family.  IPv4 uses the plain commands (no
+# -4 flag) for maximum busybox compatibility.
 ip_cmd() {
 	local fam="$1"; shift
 	if [ "$fam" = 6 ]; then
@@ -58,17 +67,41 @@ ip_cmd() {
 	fi
 }
 
-# Split "1.2.3.4:443", "[2606:...]:443" or bare IPv6 into EP_IP / EP_FAM.
-endpoint_split() {
-	EP_IP=''
-	EP_FAM=4
-	case "$1" in
-		\[*\]:*) EP_IP="${1%]:*}"; EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
-		\[*\])   EP_IP="${1%]}";  EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
-		*:*:*:*) EP_IP="$1"; EP_FAM=6 ;;
-		*:*)     EP_IP="${1%:*}"; EP_FAM=4 ;;
-		*)       EP_IP="$1" ;;
-	esac
+# Serialize shared state updates across instances.
+lock() {
+	local i=0
+	while ! mkdir "$SHARED/.lock" 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -gt 20 ]; then
+			rm -rf "$SHARED/.lock"
+			i=0
+		fi
+		sleep 1
+	done
+}
+unlock() { rmdir "$SHARED/.lock" 2>/dev/null; }
+
+# Owner files contain "<section> <iface>" lines.
+owner_add() {
+	local file="$SHARED/$1"
+	grep -q "^$SECTION " "$file" 2>/dev/null || printf '%s %s\n' "$SECTION" "$IFACE" >> "$file"
+}
+owner_del() {
+	local file="$SHARED/$1"
+	[ -f "$file" ] || return 0
+	grep -v "^$SECTION " "$file" > "$file.tmp" 2>/dev/null || : > "$file.tmp"
+	mv "$file.tmp" "$file"
+}
+owner_has() { grep -q "^$SECTION " "$SHARED/$1" 2>/dev/null; }
+owner_count() {
+	local n
+	n="$(grep -c . "$SHARED/$1" 2>/dev/null || true)"
+	printf '%s' "${n:-0}"
+}
+# Print the interfaces of all owners of an owner file (one per line).
+owner_ifaces() {
+	[ -f "$SHARED/$1" ] || return 0
+	awk '{print $2}' "$SHARED/$1" | sort -u
 }
 
 # Print default routes without volatile tokens that "ip route replace" would
@@ -82,14 +115,19 @@ sanitize_routes() {
 	done
 }
 
-save_wan_defaults() {
-	local fam file
-	for fam in 4 6; do
-		file="$STATE_DIR/wan-default-v$fam"
-		[ -e "$file" ] && continue
-		ip_cmd "$fam" route show default 2>/dev/null | sanitize_routes > "$file"
-		[ -s "$file" ] || rm -f "$file"
-	done
+# --- endpoint bypass -------------------------------------------------------
+
+# Split "1.2.3.4:443", "[2606:...]:443" or bare IPv6 into EP_IP / EP_FAM.
+endpoint_split() {
+	EP_IP=''
+	EP_FAM=4
+	case "$1" in
+		\[*\]:*) EP_IP="${1%]:*}"; EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
+		\[*\])   EP_IP="${1%]}";  EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
+		*:*:*:*) EP_IP="$1"; EP_FAM=6 ;;
+		*:*)     EP_IP="${1%:*}"; EP_FAM=4 ;;
+		*)       EP_IP="$1" ;;
+	esac
 }
 
 # Find the current route to the endpoint; sets RG_VIA and RG_DEV.
@@ -112,23 +150,39 @@ route_get() {
 	return 0
 }
 
+# Install an endpoint bypass route for family $1 (only if the endpoint is of
+# that family).  Returns 0 if no bypass is needed/applicable.
 add_endpoint_bypass() {
-	local fam="$1" ipaddr="$2" dev="$3" via="$4" pfx=32 cur
-	[ "$fam" = 6 ] && pfx=128
-	cur="$(ip_cmd "$fam" route show "$ipaddr/$pfx" 2>/dev/null)"
-	if [ -n "$cur" ]; then
-		log "endpoint route $ipaddr/$pfx already present, leaving it alone"
+	local fam="$1" pfx=32 cur i=0
+	[ -n "$ENDPOINT" ] || { log "no endpoint in environment, cannot add bypass"; return 1; }
+	endpoint_split "$ENDPOINT"
+	[ "$EP_FAM" = "$fam" ] || return 0
+	[ -n "$EP_IP" ] || return 1
+	while [ "$i" -lt "$RETRIES" ]; do
+		route_get "$fam" "$EP_IP" && break
+		i=$((i + 1))
+		sleep 1
+	done
+	[ -n "$RG_DEV" ] || { log "could not resolve route to endpoint $EP_IP"; return 1; }
+	if [ "$RG_DEV" = "$IFACE" ]; then
+		log "endpoint $EP_IP already routed via $IFACE, no bypass needed"
 		return 0
 	fi
-	if [ -n "$via" ]; then
-		ip_cmd "$fam" route replace "$ipaddr/$pfx" via "$via" dev "$dev" 2>/dev/null \
-			|| { log "failed to add bypass $ipaddr/$pfx via $via dev $dev"; return 1; }
+	[ "$fam" = 6 ] && pfx=128
+	cur="$(ip_cmd "$fam" route show "$EP_IP/$pfx" 2>/dev/null)"
+	if [ -n "$cur" ]; then
+		log "endpoint route $EP_IP/$pfx already present"
 	else
-		ip_cmd "$fam" route replace "$ipaddr/$pfx" dev "$dev" 2>/dev/null \
-			|| { log "failed to add bypass $ipaddr/$pfx dev $dev"; return 1; }
+		if [ -n "$RG_VIA" ]; then
+			ip_cmd "$fam" route replace "$EP_IP/$pfx" via "$RG_VIA" dev "$RG_DEV" 2>/dev/null \
+				|| { log "failed to add bypass $EP_IP/$pfx via $RG_VIA dev $RG_DEV"; return 1; }
+		else
+			ip_cmd "$fam" route replace "$EP_IP/$pfx" dev "$RG_DEV" 2>/dev/null \
+				|| { log "failed to add bypass $EP_IP/$pfx dev $RG_DEV"; return 1; }
+		fi
+		log "endpoint bypass: $EP_IP/$pfx via ${RG_VIA:-onlink} dev $RG_DEV"
 	fi
-	printf '%s %s %s\n' "$fam" "$ipaddr" "$dev" >> "$STATE_DIR/endpoints"
-	log "endpoint bypass: $ipaddr/$pfx via ${via:-onlink} dev $dev"
+	printf '%s %s %s\n' "$fam" "$EP_IP" "$RG_DEV" >> "$STATE_DIR/endpoints"
 	return 0
 }
 
@@ -147,146 +201,205 @@ del_endpoint_bypass() {
 	rm -f "$STATE_DIR/endpoints"
 }
 
-add_default_routes() {
-	local fam
-	for fam in 4 6; do
-		if [ "$fam" = 6 ]; then
-			if [ "$IPV6_ENABLED" = 0 ]; then
-				log "IPv6 disabled, not installing an IPv6 default route"
-				continue
-			fi
-			if ! ip -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -q 'inet6'; then
-				log "no global IPv6 address on $IFACE, not installing an IPv6 default route"
-				continue
-			fi
-		fi
-		if ip_cmd "$fam" route replace default dev "$IFACE" metric 0 2>/dev/null; then
-			log "installed IPv$fam default route dev $IFACE metric 0"
-		else
-			log "failed to install IPv$fam default route dev $IFACE"
-		fi
-	done
-}
+# --- shared default route / policy rule bookkeeping ------------------------
 
-del_default_routes() {
-	local fam
-	for fam in 4 6; do
-		ip_cmd "$fam" route del default dev "$IFACE" metric 0 2>/dev/null && \
-			log "removed IPv$fam default route dev $IFACE metric 0"
-	done
-}
-
-# --- policy routing override (mwan3 and friends) ---------------------------
-
-record_policy_rule() {
-	local fam="$1"
-	[ -f "$POLICY_STATE" ] && grep -qx "$fam $POLICY_PRIO" "$POLICY_STATE" && return 0
-	printf '%s %s\n' "$fam" "$POLICY_PRIO" >> "$POLICY_STATE"
-}
-
-add_policy_rules() {
-	local fam
-	for fam in 4 6; do
-		if [ "$fam" = 6 ] && [ "$IPV6_ENABLED" = 0 ]; then
-			continue
-		fi
-		# Prefer "add": it fails cleanly if the rule is already there.
-		if ip_cmd "$fam" rule add priority "$POLICY_PRIO" from all lookup main 2>/dev/null; then
-			log "installed IPv$fam policy rule: priority $POLICY_PRIO from all lookup main"
-			record_policy_rule "$fam"
-			continue
-		fi
-		if ip_cmd "$fam" rule show 2>/dev/null | grep -q "^$POLICY_PRIO:.*lookup main"; then
-			log "IPv$fam policy rule priority $POLICY_PRIO already present"
-			record_policy_rule "$fam"
-		else
-			log "could not install IPv$fam policy rule priority $POLICY_PRIO (policy routing may still divert traffic)"
-		fi
-	done
-}
-
-del_policy_rules() {
-	local fam prio
-	[ -f "$POLICY_STATE" ] || return 0
-	while read -r fam prio; do
-		[ -n "$fam" ] && [ -n "$prio" ] || continue
-		if ip_cmd "$fam" rule del priority "$prio" 2>/dev/null; then
-			log "removed IPv$fam policy rule priority $prio"
-		else
-			log "IPv$fam policy rule priority $prio already gone"
-		fi
-	done < "$POLICY_STATE"
-	rm -f "$POLICY_STATE"
+save_wan_defaults() {
+	local fam="$1" file="$SHARED/wan-default-v$1"
+	[ -e "$file" ] && return 0
+	ip_cmd "$fam" route show default 2>/dev/null | sanitize_routes > "$file"
+	[ -s "$file" ] || rm -f "$file"
 }
 
 restore_wan_defaults() {
-	local fam file line has
-	for fam in 4 6; do
-		file="$STATE_DIR/wan-default-v$fam"
-		[ -s "$file" ] || { rm -f "$file"; continue; }
-		# Any default route that does not point at the tunnel?
-		has="$(ip_cmd "$fam" route show default 2>/dev/null | grep -v "dev $IFACE" )"
-		if [ -n "$has" ]; then
-			log "IPv$fam default route present after cleanup, nothing to restore"
-			rm -f "$file"
-			continue
-		fi
-		while IFS= read -r line; do
-			[ -n "$line" ] || continue
-			# shellcheck disable=SC2086
-			if ip_cmd "$fam" route replace $line 2>/dev/null; then
-				log "restored WAN default route: $line"
-			else
-				log "failed to restore WAN default route: $line"
-			fi
-		done < "$file"
-		rm -f "$file"
+	local fam="$1" file="$SHARED/wan-default-v$1" line remaining iface
+	[ -s "$file" ] || { rm -f "$file"; return 0; }
+	remaining="$(ip_cmd "$fam" route show default 2>/dev/null)"
+	for iface in $(owner_ifaces "v$fam-default") "$IFACE"; do
+		remaining="$(printf '%s\n' "$remaining" | grep -v "dev $iface" )"
 	done
+	if [ -n "$remaining" ]; then
+		log "IPv$fam default route present after cleanup, nothing to restore"
+		rm -f "$file"
+		return 0
+	fi
+	while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		# shellcheck disable=SC2086
+		if ip_cmd "$fam" route replace $line 2>/dev/null; then
+			log "restored WAN default route: $line"
+		else
+			log "failed to restore WAN default route: $line"
+		fi
+	done < "$file"
+	rm -f "$file"
+}
+
+policy_add() {
+	local fam="$1" file="iprule-v$1"
+	lock
+	if [ "$(owner_count "$file")" -eq 0 ]; then
+		if ip_cmd "$fam" rule add priority "$POLICY_PRIO" from all lookup main 2>/dev/null; then
+			echo 1 > "$SHARED/$file.added"
+			log "installed IPv$fam policy rule: priority $POLICY_PRIO from all lookup main"
+		elif ip_cmd "$fam" rule show 2>/dev/null | grep -q "^$POLICY_PRIO:.*lookup main"; then
+			echo 0 > "$SHARED/$file.added"
+			log "IPv$fam policy rule priority $POLICY_PRIO already present"
+		else
+			unlock
+			log "could not install IPv$fam policy rule priority $POLICY_PRIO"
+			return 1
+		fi
+	fi
+	owner_add "$file"
+	unlock
+	return 0
+}
+
+policy_del() {
+	local fam="$1" file="iprule-v$1" added
+	lock
+	owner_del "$file"
+	if [ "$(owner_count "$file")" -eq 0 ]; then
+		added="$(cat "$SHARED/$file.added" 2>/dev/null)"
+		if [ "$added" = 1 ]; then
+			if ip_cmd "$fam" rule del priority "$POLICY_PRIO" 2>/dev/null; then
+				log "removed IPv$fam policy rule priority $POLICY_PRIO"
+			else
+				log "IPv$fam policy rule priority $POLICY_PRIO already gone"
+			fi
+		fi
+		rm -f "$SHARED/$file.added"
+	fi
+	unlock
+}
+
+# --- IPv4 default route (opt-in) -------------------------------------------
+
+add_v4_default() {
+	[ "$DEFAULT_ROUTE" = 1 ] || return 0
+	add_endpoint_bypass 4 || log "IPv4 endpoint bypass failed; not changing the default route"
+	[ -n "$RG_DEV" ] || return 0
+
+	lock
+	if [ "$(owner_count v4-default)" -eq 0 ]; then
+		save_wan_defaults 4
+	fi
+	owner_add v4-default
+	unlock
+
+	if ip route replace default dev "$IFACE" metric "$METRIC" 2>/dev/null; then
+		log "installed IPv4 default route dev $IFACE metric $METRIC"
+	else
+		log "failed to install IPv4 default route dev $IFACE"
+	fi
+	policy_add 4
+}
+
+del_v4_default() {
+	[ "$DEFAULT_ROUTE" = 1 ] || return 0
+	owner_has v4-default || return 0
+	ip route del default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+		&& log "removed IPv4 default route dev $IFACE metric $METRIC"
+	lock
+	owner_del v4-default
+	local last
+	last="$(owner_count v4-default)"
+	unlock
+	if [ "$last" -eq 0 ]; then
+		policy_del 4
+		restore_wan_defaults 4
+	fi
+}
+
+# --- IPv6 default route (auto/always/off, independent of default_route) -----
+
+# Print an existing IPv6 default route that is not owned by us (if any).
+# Routes via interfaces owned by another usque section are not "foreign".
+v6_foreign_default() {
+	local line dev iface skip
+	ip -6 route show default 2>/dev/null | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		dev="$(printf '%s\n' "$line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')"
+		skip=0
+		for iface in $(owner_ifaces v6-default); do
+			[ "$iface" = "$dev" ] && skip=1
+		done
+		[ "$skip" = 0 ] && { printf '%s\n' "$line"; break; }
+	done
+}
+
+add_v6_default() {
+	[ "$IPV6_ENABLED" = 1 ] || return 0
+	[ "$IPV6_ROUTE" = off ] && return 0
+	if [ "$IPV6_ROUTE" = auto ] && [ -n "$(v6_foreign_default)" ]; then
+		log "native IPv6 default route present, ipv6_route=auto: leaving IPv6 routing untouched"
+		return 0
+	fi
+	if ! ip -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -q 'inet6'; then
+		log "no global IPv6 address on $IFACE, not installing an IPv6 default route"
+		return 0
+	fi
+	add_endpoint_bypass 6 || log "IPv6 endpoint bypass failed; not changing the IPv6 default route"
+	if [ -n "$ENDPOINT" ]; then
+		endpoint_split "$ENDPOINT"
+		[ "$EP_FAM" = 6 ] && [ -z "$RG_DEV" ] && return 0
+	fi
+
+	lock
+	if [ "$(owner_count v6-default)" -eq 0 ]; then
+		save_wan_defaults 6
+	fi
+	owner_add v6-default
+	unlock
+
+	if ip -6 route replace default dev "$IFACE" metric "$METRIC" 2>/dev/null; then
+		log "installed IPv6 default route dev $IFACE metric $METRIC (ipv6_route=$IPV6_ROUTE)"
+	else
+		log "failed to install IPv6 default route dev $IFACE"
+	fi
+	policy_add 6
+}
+
+del_v6_default() {
+	[ "$IPV6_ENABLED" = 1 ] || return 0
+	[ "$IPV6_ROUTE" = off ] && return 0
+	owner_has v6-default || return 0
+	ip -6 route del default dev "$IFACE" metric "$METRIC" 2>/dev/null \
+		&& log "removed IPv6 default route dev $IFACE metric $METRIC"
+	lock
+	owner_del v6-default
+	local last
+	last="$(owner_count v6-default)"
+	unlock
+	if [ "$last" -eq 0 ]; then
+		policy_del 6
+		restore_wan_defaults 6
+	fi
 }
 
 # --- events ----------------------------------------------------------------
 
 do_connect() {
-	save_wan_defaults
-
-	# Endpoint bypass route (must be installed before the default route).
-	if [ -n "$ENDPOINT" ]; then
-		endpoint_split "$ENDPOINT"
-		if [ -n "$EP_IP" ]; then
-			local i=0
-			while [ "$i" -lt "$RETRIES" ]; do
-				if route_get "$EP_FAM" "$EP_IP"; then
-					break
-				fi
-				i=$((i + 1))
-				sleep 1
-			done
-			if [ -n "$RG_DEV" ]; then
-				if [ "$RG_DEV" = "$IFACE" ]; then
-					log "endpoint $EP_IP already routed via $IFACE, no bypass needed"
-				else
-					add_endpoint_bypass "$EP_FAM" "$EP_IP" "$RG_DEV" "$RG_VIA"
-				fi
-			else
-				log "could not resolve route to endpoint $EP_IP, not touching default routes"
-				return 0
-			fi
+	local want_v4=0 want_v6=0
+	[ "$DEFAULT_ROUTE" = 1 ] && want_v4=1
+	if [ "$IPV6_ENABLED" = 1 ] && [ "$IPV6_ROUTE" != off ]; then
+		want_v6=1
+		if [ "$IPV6_ROUTE" = auto ] && [ -n "$(v6_foreign_default)" ]; then
+			want_v6=0
 		fi
-	else
-		log "no USQUE_ENDPOINT in environment"
 	fi
-
-	add_default_routes
-	add_policy_rules
+	if [ "$want_v4" = 0 ] && [ "$want_v6" = 0 ]; then
+		log "no routing changes requested (default_route=$DEFAULT_ROUTE, ipv6_route=$IPV6_ROUTE)"
+		return 0
+	fi
+	add_v4_default
+	add_v6_default
 }
 
 do_disconnect() {
-	# Restore policy routing first: if anything below fails, traffic falls
-	# back to the WAN instead of a dead tunnel.
-	del_policy_rules
 	del_endpoint_bypass
-	del_default_routes
-	restore_wan_defaults
+	del_v4_default
+	del_v6_default
 }
 
 case "$EVENT" in
