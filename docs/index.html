@@ -19,14 +19,13 @@
 </head>
 <body>
 <!--
-  v2 draft notes (remove once the 0.2.x artifacts are final):
-  - installed/download sizes are still placeholders ("about 3 MB" / "under 3 MB")
-  - the client has a --protocol flag (default cf-connect-ip; --protocol connect-ip for
-    non-Cloudflare MASQUE servers) that the packaged init does not map yet; not documented
-    until we know whether a UCI option is coming
-  - version/footer shows 0.2.0-r1, matching PKG_VERSION 0.2.0 + PKG_RELEASE 1 in openwrt/usque
-  - UCI/behaviour text follows openwrt/usque v2 (init + hook + firewall + lan_ipv6) and the
-    LuCI labels in openwrt/luci-app-usque; re-check if the UI changes before release
+  Documentation notes:
+  - sizes/versions reflect the 0.2.0-r1 feed: usque 0.2.0-r1 (2,902,152 B binary,
+    sha256 7c1c5f694b53a79f8af146ba099aad1fe9f7032e9094d96f2f780fe3de45eda6) and
+    luci-app-usque 1.0.0-r1 (PKG_VERSION 1.0.0); update when the feed changes
+  - LAN IPv6 helper: wording follows the packaged helper; end-to-end validation of the
+    packaged helper was still pending, so the docs make no "verified" claim for LAN IPv6
+  - LuCI screenshot (docs/img/luci-overview.png) still to be added; figure is commented in place
 -->
 <a class="skip-link" href="#main">Skip to content</a>
 
@@ -147,8 +146,9 @@
         </article>
         <article class="card">
           <h3>Small and static</h3>
-          <p>Cross-compiled for musl with LTO and size optimisations, stripped, and packaged as an
-          apk: roughly 3&nbsp;MB installed together with the LuCI app.</p>
+          <p>Cross-compiled for musl with LTO and size optimisations, stripped and packaged as an
+          apk: <strong>1.43&nbsp;MB download</strong>, about <strong>2.9&nbsp;MB installed</strong>.
+          The LuCI app adds a 21&nbsp;KB package (~55&nbsp;KB installed).</p>
         </article>
         <article class="card">
           <h3>TUN mode only</h3>
@@ -214,8 +214,10 @@
             </tr>
             <tr>
               <th scope="row">Free space</th>
-              <td>About <strong>3&nbsp;MB</strong> free in <code>/overlay</code> for the binary and the
-              LuCI app. Check with <code>df -h /overlay</code> first.</td>
+              <td>About <strong>3&nbsp;MB</strong> free in <code>/overlay</code>: the package build
+              reports <strong>2,943&nbsp;KiB installed</strong> for <code>usque</code> +
+              <code>luci-app-usque</code>. Check with <code>df -h /overlay</code> first — on a
+              3.3&nbsp;MB-overlay router this is tight but fits.</td>
             </tr>
             <tr>
               <th scope="row">Network</th>
@@ -249,10 +251,10 @@
             </tr>
             <tr>
               <th scope="row">Measured footprint</th>
-              <td>On the test router: about <strong>2.8&nbsp;MB</strong> static binary,
-              ~6.7&nbsp;MB resident memory while connected, and roughly 1&nbsp;% of one CPU core
-              when idle. The tunnel runs in user space, so throughput is bounded by the router's
-              CPU.</td>
+              <td>Static binary: <strong>2,902,152&nbsp;B (2.77&nbsp;MiB)</strong>, downloaded as a
+              1.43&nbsp;MB apk. On the test router the daemon used ~6.7&nbsp;MB resident memory while
+              connected and roughly 1&nbsp;% of one CPU core when idle. The tunnel runs in user space,
+              so throughput is bounded by the router's CPU.</td>
             </tr>
           </tbody>
         </table>
@@ -341,6 +343,13 @@ apk add luci-app-usque</code></pre>
           <p>The <code>luci-app-usque</code> package depends on <code>usque</code> and
           <code>kmod-tun</code>, so one command installs the daemon, the init script, the UCI
           configuration and the LuCI view. For a CLI-only setup use <code>apk add usque</code>.</p>
+          <p>Check what you got — the two packages are versioned independently:</p>
+          <figure class="cmd">
+            <pre><code>apk info -v usque            # usque-0.2.0-r1
+apk info -v luci-app-usque   # luci-app-usque-1.0.0-r1
+sha256sum /usr/bin/usque
+# 7c1c5f694b53a79f8af146ba099aad1fe9f7032e9094d96f2f780fe3de45eda6</code></pre>
+          </figure>
         </li>
         <li>
           <h4>Open LuCI</h4>
@@ -814,10 +823,13 @@ config usque 'backup'
 }</code></pre>
       </figure>
       <p class="fineprint">Shape only — get the real values from your provider. Importing writes the
-      file atomically with mode <code>600</code>. If your provider needs TLS SNI or a specific HTTP
-      authority, set the connection's <code>sni</code> option (<code>-s</code>; LuCI: <em>TLS SNI
-      (custom mode)</em>) or <code>authority</code> option (<code>--authority</code>; UCI only) — they
-      are not part of the JSON. <code>logread -e usque</code> reports the handshake result.</p>
+      file atomically with mode <code>600</code>. Provider-specific TLS settings are separate
+      connection options (not part of the JSON): <code>sni</code> (<code>-s</code>; LuCI <em>TLS SNI
+      (custom mode)</em>), <code>authority</code> (<code>--authority</code>; LuCI <em>HTTP authority
+      (custom mode)</em>) and <code>protocol</code> (<code>--protocol</code>; LuCI <em>CONNECT
+      protocol (custom mode)</em> — pick <code>connect-ip</code> for an RFC&nbsp;9484 server, leave
+      empty for Cloudflare's <code>cf-connect-ip</code>). <code>logread -e usque</code> reports the
+      handshake result.</p>
       <p>The endpoint must speak a compatible MASQUE/Connect-IP service. Custom connections are not
       registered or re-registered by the init script, and <code>auto_register</code> does nothing for
       them.</p>
@@ -856,7 +868,8 @@ config usque 'backup'
             <tr><td><code>auto_register</code></td><td><code>1</code></td><td>Cloudflare mode only: register a WARP device if the config file is missing. Registration is non-interactive, so it <strong>accepts Cloudflare's WARP terms</strong> on your behalf — set it to <code>0</code> if you want to be asked.</td></tr>
             <tr><td><code>device_name</code></td><td><em>empty</em></td><td>Name used when registering a new device.</td></tr>
             <tr><td><code>sni</code></td><td><em>empty</em></td><td>TLS SNI for custom endpoints (passed as <code>-s &lt;sni&gt;</code>). Not needed for Cloudflare WARP.</td></tr>
-            <tr><td><code>authority</code></td><td><em>empty</em></td><td>HTTP authority/host to present to a custom endpoint (<code>--authority &lt;host&gt;</code>); useful when the endpoint expects a specific hostname. Not exposed in the LuCI form.</td></tr>
+            <tr><td><code>authority</code></td><td><em>empty</em></td><td>CONNECT <code>:authority</code> presented to a custom MASQUE server (<code>--authority</code>; a bare host becomes <code>https://&lt;host&gt;</code>). LuCI: <em>HTTP authority (custom mode)</em>.</td></tr>
+            <tr><td><code>protocol</code></td><td><em>empty</em></td><td>CONNECT protocol token for custom endpoints (<code>--protocol</code>): empty keeps Cloudflare's <code>cf-connect-ip</code>, use <code>connect-ip</code> for RFC&nbsp;9484 servers. LuCI: <em>CONNECT protocol (custom mode)</em>.</td></tr>
             <tr><td><code>log_level</code></td><td><code>info</code></td><td>Daemon log level: <code>error</code>, <code>warn</code>, <code>info</code>, <code>debug</code>.</td></tr>
           </tbody>
         </table>
@@ -923,8 +936,8 @@ usque --version</code></pre>
       packaged service adds the routing hook and applies the switches described above. Use the service
       for routed setups. The init script maps the UCI options to CLI flags: <code>ipv6='0'</code> →
       <code>--no-tunnel-ipv6</code>, <code>endpoint_ipv6='1'</code> → <code>--ipv6</code>,
-      <code>sni</code> → <code>-s</code>, <code>authority</code> →
-      <code>--authority</code>.</p>
+      <code>sni</code> → <code>-s</code>, <code>authority</code> → <code>--authority</code>,
+      <code>protocol</code> → <code>--protocol</code>.</p>
 
       <h3 id="service">Service commands and logs</h3>
       <figure class="cmd">
@@ -1062,8 +1075,10 @@ ip -6 route show default</code></pre>
         connection's <em>Configuration JSON</em> box, or write it yourself). Common causes: wrong or
         expired keys, the endpoint unreachable over UDP/443, or a missing <code>sni</code> when the
         provider requires TLS SNI (<code>uci set usque.&lt;section&gt;.sni='example.com'</code>, passed
-        as <code>-s</code>) or an HTTP authority (<code>uci set
-        usque.&lt;section&gt;.authority='example.com'</code>, passed as <code>--authority</code>). Check <code>logread -e usque</code> for handshake errors, verify the
+        as <code>-s</code>), an HTTP authority (<code>uci set
+        usque.&lt;section&gt;.authority='example.com'</code>, passed as <code>--authority</code>) or a
+        different CONNECT protocol token (<code>uci set usque.&lt;section&gt;.protocol='connect-ip'</code>
+        for an RFC&nbsp;9484 server; empty means Cloudflare's <code>cf-connect-ip</code>). Check <code>logread -e usque</code> for handshake errors, verify the
         required fields against <a href="#custom">custom mode</a>, and confirm the same credentials
         work with another client. Remember: <code>auto_register</code> has no effect in custom
         mode.</p>
@@ -1314,15 +1329,19 @@ apk del luci-app-usque usque</code></pre>
       <div class="grid">
         <article class="card">
           <h3>Current release</h3>
-          <p><code>usque 0.2.0-r1</code> · <code>luci-app-usque 0.2.0-r1</code> for OpenWrt 25.12
-          (<code>arm_cortex-a7_neon-vfpv4</code>). Confirm the installed version with
-          <code>apk info -v usque</code>.</p>
+          <p><code>usque 0.2.0-r1</code> · <code>luci-app-usque 1.0.0-r1</code> for OpenWrt 25.12
+          (<code>arm_cortex-a7_neon-vfpv4</code>) — the two packages are versioned independently.
+          Binary: 2,902,152&nbsp;B (2.77&nbsp;MiB), sha256
+          <code>7c1c5f69…45eda6</code>. Installed size 2,943&nbsp;KiB. Confirm with
+          <code>apk info -v usque</code> and <code>apk info -v luci-app-usque</code>.</p>
         </article>
         <article class="card">
           <h3>Feed files</h3>
           <p><a href="feed/packages.adb"><code>packages.adb</code></a> (signed index),
           <a href="feed/usque.pem"><code>usque.pem</code></a> (public key),
-          and the versioned <code>usque-*.apk</code> / <code>luci-app-usque-*.apk</code> packages.</p>
+          <a href="feed/usque-0.2.0-r1.apk"><code>usque-0.2.0-r1.apk</code></a> (1,463,960&nbsp;B) and
+          <a href="feed/luci-app-usque-1.0.0-r1.apk"><code>luci-app-usque-1.0.0-r1.apk</code></a>
+          (21,310&nbsp;B).</p>
         </article>
         <article class="card">
           <h3>Licence</h3>
@@ -1430,7 +1449,7 @@ apk del luci-app-usque usque</code></pre>
     </div>
     <p class="footer-meta">
       <span>Site updated <time datetime="2026-10-26">2026-10-26</time></span>
-      <span>Feed release <code>usque 0.2.0-r1</code> — check yours with <code>apk info -v usque</code></span>
+      <span>Feed release <code>usque 0.2.0-r1</code> · <code>luci-app-usque 1.0.0-r1</code> — check yours with <code>apk info -v usque</code></span>
       <span>MIT licence · not affiliated with Cloudflare</span>
     </p>
   </div>
