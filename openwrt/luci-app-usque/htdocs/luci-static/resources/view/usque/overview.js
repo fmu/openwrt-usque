@@ -35,7 +35,6 @@ var CONFIG_EXAMPLE = '{\n' +
 
 /* rpcd methods (see /usr/libexec/rpcd/luci.usque) */
 var callStatus = rpc.declare({ object: 'luci.usque', method: 'status', expect: {} });
-var callGetConfig = rpc.declare({ object: 'luci.usque', method: 'getConfig', params: [ 'section' ], expect: {} });
 var callRegister = rpc.declare({ object: 'luci.usque', method: 'register', params: [ 'section', 'name', 'accept_tos' ], expect: {} });
 var callRegisterStatus = rpc.declare({ object: 'luci.usque', method: 'registerStatus', params: [ 'section' ], expect: {} });
 var callImportConfig = rpc.declare({ object: 'luci.usque', method: 'importConfig', params: [ 'section', 'json' ], expect: {} });

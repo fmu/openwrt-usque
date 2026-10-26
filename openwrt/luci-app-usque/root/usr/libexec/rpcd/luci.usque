@@ -136,6 +136,18 @@ section_known() {
 	section_valid "$1" && section_list | grep -qx "$1"
 }
 
+default_section() {
+	# first configured connection (used by read-only methods without a section)
+	local sid
+
+	for sid in $(section_list); do
+		section_valid "$sid" || continue
+		printf '%s' "$sid"
+		return 0
+	done
+	return 1
+}
+
 section_config_file() {
 	# absolute path of the WARP config JSON for a section
 	local f
@@ -521,7 +533,8 @@ do_get_config() {
 	local sid cfg exists valid secure
 
 	json_get_var sid section
-	section_valid "$sid" || reply_error "Invalid or missing section"
+	[ -n "$sid" ] || sid="$(default_section)" || reply_error "No connections are configured"
+	section_valid "$sid" || reply_error "Invalid section '$sid'"
 	section_known "$sid" || reply_error "Unknown section '$sid'"
 
 	cfg="$(section_config_file "$sid")"
@@ -918,6 +931,9 @@ do_test() {
 	local sid iface bound warp ip colo loc gw ts raw
 
 	json_get_var sid section
+	if [ -z "$sid" ]; then
+		sid="$(default_section)" || sid=""
+	fi
 	iface=""
 	if [ -n "$sid" ]; then
 		section_valid "$sid" || reply_error "Invalid section '$sid'"

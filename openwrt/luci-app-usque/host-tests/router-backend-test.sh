@@ -125,7 +125,7 @@ has "$r" '"connections": \[' && check "status: connections array" 0 || check "st
 r=$(ask getConfig '{"section":"nope"}')
 has "$r" 'Unknown section' && check "getConfig: unknown section rejected" 0 || check "getConfig: unknown section rejected" 1 "$r"
 r=$(ask getConfig '{}')
-has "$r" 'Invalid or missing section' && check "getConfig: missing section rejected" 0 || check "getConfig: missing section rejected" 1 "$r"
+has "$r" 'No connections are configured' && check "getConfig: no default section without connections" 0 || check "getConfig: no default section without connections" 1 "$r"
 
 echo
 echo "=================================================================="
@@ -168,6 +168,9 @@ if has "$r" 'MAINKEYMATERIAL\|MAINTOKEN\|private_key\|access_token'; then
 else
 	check "status: no secrets leaked" 0
 fi
+
+r=$(ask getConfig '{}')
+has "$r" '"section": "main"' && check "getConfig without section uses the first connection" 0 || check "getConfig without section uses the first connection" 1 "$r"
 
 r=$(ask getConfig '{"section":"main"}')
 isjson "$r" && check "getConfig main JSON" 0 || check "getConfig main JSON" 1 "$r"
@@ -250,6 +253,9 @@ echo "6) test / logs / fixConfigPermissions / deleteConfig"
 echo "=================================================================="
 r=$(ask test '{"section":"main"}')
 has "$r" '"warp":' && check "test returns warp state" 0 || check "test returns warp state" 1 "$r"
+r=$(ask test '{}')
+has "$r" '"warp":' && check "test without section uses the first connection" 0 || check "test without section uses the first connection" 1 "$r"
+has "$r" '"section": "main"' && check "test reports the defaulted section" 0 || check "test reports the defaulted section" 1 "$r"
 has "$r" '"method": "curl' && check "test used curl" 0 || check "test used curl" 1 "$r"
 r=$(ask test '{"section":"ghost"}')
 has "$r" 'Unknown section' && check "test: unknown section rejected" 0 || check "test: unknown section rejected" 1 "$r"
