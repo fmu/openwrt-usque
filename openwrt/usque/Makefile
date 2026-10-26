@@ -26,8 +26,8 @@ PKGARCH:=arm_cortex-a7_neon-vfpv4
 include $(INCLUDE_DIR)/package.mk
 
 # Path to the cross-compiled static binary.  Override on the make command line
-# (e.g. `make package/usque/compile USQUE_BIN=/path/to/usque`).
-USQUE_BIN?=$(CURDIR)/bin/usque
+# (e.g. `make package/usque/compile USQUE_BINARY=/path/to/usque`).
+USQUE_BINARY?=$(CURDIR)/bin/usque
 
 define Package/usque
   SECTION:=net
@@ -52,22 +52,17 @@ define Package/usque/conffiles
 endef
 
 define Build/Compile
-	@[ -f "$(USQUE_BIN)" ] || { \
-		echo "ERROR: usque binary not found at $(USQUE_BIN)"; \
+	@[ -s "$(USQUE_BINARY)" ] || { \
+		echo "ERROR: usque binary not found at $(USQUE_BINARY)"; \
 		echo "       run build/build-usque.sh, then copy dist/usque to openwrt/usque/bin/usque"; \
 		exit 1; \
 	}
-	@magic="$$(od -An -tx1 -N4 "$(USQUE_BIN)" 2>/dev/null | tr -d ' \n')"; \
-	if [ "$$magic" != "7f454c46" ]; then \
-		echo "ERROR: $(USQUE_BIN) is not an ELF binary (magic=$$magic)"; \
-		exit 1; \
-	fi
-	@echo "usque binary: $$(stat -c '%s' "$(USQUE_BIN)" 2>/dev/null || stat -f '%z' "$(USQUE_BIN)") bytes"
+	@echo "usque binary: $$(wc -c < "$(USQUE_BINARY)") bytes"
 endef
 
 define Package/usque/install
 	$(INSTALL_DIR) $(1)/usr/bin
-	$(INSTALL_BIN) $(USQUE_BIN) $(1)/usr/bin/usque
+	$(INSTALL_BIN) $(USQUE_BINARY) $(1)/usr/bin/usque
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/etc/init.d/usque $(1)/etc/init.d/usque
 	$(INSTALL_DIR) $(1)/etc/config

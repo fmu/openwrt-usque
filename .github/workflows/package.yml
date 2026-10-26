@@ -117,8 +117,9 @@ jobs:
 
       - name: Build usque binary (armv7 musl, QUIC only)
         if: ${{ !inputs.dummy_binary }}
-        env:
-          FEATURES: quinn
+        # Feature selection is owned by build/build-usque.sh (QUIC-only build:
+        # the `quinn` feature lives on the usque-masque crate, not usque-cli,
+        # so FEATURES=quinn cannot be passed to `-p usque-cli`).
         run: |
           set -euo pipefail
           if [ ! -x build/build-usque.sh ]; then

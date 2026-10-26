@@ -92,9 +92,11 @@ build_pkg() {
 	log "Building package/$dir"
 	(
 		cd "$SDK_DIR"
-		env TOPDIR="$SDK_DIR" SDK=1 OPENWRT_BUILD=1 DEVELOPER=1 \
+		env -u USQUE_BIN -u USQUE_BINARY \
+			TOPDIR="$SDK_DIR" SDK=1 OPENWRT_BUILD=1 DEVELOPER=1 \
 			PATH="$SDK_DIR/staging_dir/host/bin:$PATH" \
-			make -C "package/$dir" compile V=s
+			make -C "package/$dir" compile V=s \
+			USQUE_BINARY="$SDK_DIR/package/usque/bin/usque"
 	)
 }
 
