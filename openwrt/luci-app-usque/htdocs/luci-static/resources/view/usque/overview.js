@@ -626,6 +626,12 @@ return view.extend({
 			return Promise.resolve();
 		}
 
+		if (this.status && this.status.config_exists !== true) {
+			ui.addNotification(_('No WARP configuration'), E('p', {},
+				_('Register a WARP device first ("Generate WARP configuration" above). Starting now would make the init script register synchronously and block the web interface.')), 'warning');
+			return Promise.resolve();
+		}
+
 		return this.doServiceAction('start');
 	},
 
@@ -634,6 +640,12 @@ return view.extend({
 	},
 
 	handleRestart: function() {
+		if (this.status && this.status.config_exists !== true) {
+			ui.addNotification(_('No WARP configuration'), E('p', {},
+				_('Register a WARP device first ("Generate WARP configuration" above).')), 'warning');
+			return Promise.resolve();
+		}
+
 		return this.doServiceAction('restart');
 	},
 

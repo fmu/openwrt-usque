@@ -485,8 +485,20 @@ function assert(cond, msg) {
 		assert(v.status.config_path === '/tmp/other.json', 'this.status updated');
 	});
 
+	await t('handleStart/handleRestart refuse without a WARP config', async function() {
+		statusData = baseStatus({ config_exists: false, config_valid: false });
+		v.updateStatus(statusData);
+		const beforeActions = initActions.length;
+		const beforeNotifs = notifications.length;
+		await v.handleStart();
+		await v.handleRestart();
+		assert(initActions.length === beforeActions, 'no init action issued');
+		assert(notifications.length === beforeNotifs + 2, 'two warnings');
+	});
+
 	await t('handleStart/handleStop/handleRestart call setInitAction', async function() {
 		statusData = baseStatus();
+		v.updateStatus(statusData);
 		await v.handleStart();
 		await v.handleStop();
 		await v.handleRestart();
