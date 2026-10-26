@@ -1,0 +1,24 @@
+[package]
+name = "usque-tunnel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+usque-masque.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+usque-cloudflare-api.workspace = true
+usque-config.workspace = true
+usque-crypto.workspace = true
+usque-virtual-net.workspace = true

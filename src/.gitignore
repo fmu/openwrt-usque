@@ -1,0 +1,14 @@
+/target
+
+# env file
+.env
+
+# Usque specific
+config*.json*
+usque
+usque.exe
+dist/
+
+# Generated vendor copy for h3 patch
+/vendor/h3
+/.cargo

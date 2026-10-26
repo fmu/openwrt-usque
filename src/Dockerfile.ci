@@ -1,0 +1,13 @@
+FROM debian:stable-slim
+
+ARG BINARY=usque
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY $BINARY /app/usque
+RUN chmod +x /app/usque
+
+ENTRYPOINT ["/app/usque"]

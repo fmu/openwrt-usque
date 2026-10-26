@@ -1,0 +1,35 @@
+--- a/src/ext.rs
++++ b/src/ext.rs
+@@ -13,6 +13,8 @@
+     pub const WEB_TRANSPORT: Protocol = Protocol(ProtocolInner::WebTransport);
+     /// RFC 9298 protocol
+     pub const CONNECT_UDP: Protocol = Protocol(ProtocolInner::ConnectUdp);
++    /// Cloudflare MASQUE CONNECT-IP protocol (legacy WARP protocol token)
++    pub const CF_CONNECT_IP: Protocol = Protocol(ProtocolInner::CfConnectIp);
+ 
+     /// Return a &str representation of the `:protocol` pseudo-header value
+     #[inline]
+@@ -20,6 +22,7 @@
+         match self.0 {
+             ProtocolInner::WebTransport => "webtransport",
+             ProtocolInner::ConnectUdp => "connect-udp",
++            ProtocolInner::CfConnectIp => "cf-connect-ip",
+         }
+     }
+ }
+@@ -28,6 +31,7 @@
+ enum ProtocolInner {
+     WebTransport,
+     ConnectUdp,
++    CfConnectIp,
+ }
+ 
+ /// Error when parsing the protocol
+@@ -40,6 +44,7 @@
+         match s {
+             "webtransport" => Ok(Self(ProtocolInner::WebTransport)),
+             "connect-udp" => Ok(Self(ProtocolInner::ConnectUdp)),
++            "cf-connect-ip" => Ok(Self(ProtocolInner::CfConnectIp)),
+             _ => Err(InvalidProtocol),
+         }
+     }

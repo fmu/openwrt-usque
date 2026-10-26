@@ -1,0 +1,119 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    name: Check for changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Compare against last nightly
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          prev=$(gh release view nightly --repo "${{ github.repository }}" --json body -q '.body' 2>/dev/null | grep -oP 'commit \K[0-9a-f]+' | head -1 || true)
+          if [ -n "$prev" ] && [ "$prev" = "${{ github.sha }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No changes since last nightly ($prev); skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Previous nightly commit: ${prev:-none}; will build."
+          fi
+
+  build:
+    name: Build (${{ matrix.arch_tag }})
+    needs: check
+    if: needs.check.outputs.skip != 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_tag: amd64
+            runner: ubuntu-latest
+            asset: usque-linux-amd64
+            target: x86_64-unknown-linux-gnu
+          - arch_tag: arm64
+            runner: ubuntu-24.04-arm
+            asset: usque-linux-arm64
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Vendor patched h3
+        run: bash vendor/prepare_h3.sh
+
+      - uses: rui314/setup-mold@v1
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake clang perl
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --locked -p usque-cli --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/usque ${{ matrix.asset }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish Nightly Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Delete existing nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release delete nightly --yes --cleanup-tag || true
+
+      - name: Create nightly release
+        uses: softprops/action-gh-release@v3.0.3
+        with:
+          tag_name: nightly
+          name: Nightly
+          body: |
+            Automated nightly build from `main` (commit ${{ github.sha }}).
+          prerelease: true
+          make_latest: true
+          files: dist/*

@@ -1,0 +1,15 @@
+# build outputs
+/dist/
+/src/target/
+/src/vendor/h3/
+*.o
+*.apk
+*.adb
+*.tar.gz
+
+# local-only reference material (contains live router credentials)
+/reference/
+/.secrets/
+
+# editor/OS noise
+.DS_Store

@@ -1,0 +1,33 @@
+[package]
+name = "usque-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "usque_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "usque"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+crossfire.workspace = true
+humantime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+usque-cloudflare-api.workspace = true
+usque-config.workspace = true
+usque-crypto.workspace = true
+usque-masque.workspace = true
+usque-portfw.workspace = true
+usque-proxy-http.workspace = true
+usque-proxy-socks.workspace = true
+usque-tunnel-core.workspace = true
+usque-tun-platform.workspace = true
+usque-virtual-net.workspace = true

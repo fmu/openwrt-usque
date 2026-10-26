@@ -1,0 +1,18 @@
+[package]
+name = "usque-proxy-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+usque-virtual-net.workspace = true
