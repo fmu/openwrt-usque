@@ -108,13 +108,14 @@
         </article>
         <article class="card">
           <h3>TUN mode only</h3>
-          <p>SOCKS5, HTTP proxy and port-forwarding modes were removed from this build to keep the
-          binary small. The router routes packets; nothing else to configure.</p>
+          <p>SOCKS5, HTTP proxy, port-forwarding and the HTTP/2 fallback transport were removed
+          from this build to keep the binary small. The router routes packets; nothing else to
+          configure.</p>
         </article>
         <article class="card">
           <h3>Reversible</h3>
-          <p>Stopping the service removes the tunnel routes immediately. Your WAN routing and LAN
-          access to the router keep working.</p>
+          <p>Stopping the service removes the tunnel route and the policy-routing rule immediately.
+          Your WAN routing and LAN access to the router keep working.</p>
         </article>
       </div>
 
@@ -165,10 +166,12 @@
             </tr>
             <tr>
               <th scope="row">Network</th>
-              <td>Outbound <strong>UDP/443</strong> to Cloudflare's WARP endpoints. If UDP is blocked
-              (some tethering, hotel or corporate networks), switch on the HTTP/2 fallback over
-              TCP/443 (support is included in the build by default; the <code>http2</code> UCI option
-              defaults to off).</td>
+              <td>Outbound <strong>UDP/443</strong> to Cloudflare's WARP endpoints (MASQUE over
+              QUIC/HTTP&nbsp;3). This build is QUIC-only: it has <strong>no TCP/HTTP&nbsp;2
+              fallback</strong>, so if your ISP or upstream network blocks UDP/443 the tunnel cannot
+              connect. In that case use the
+              <a href="https://github.com/Diniboy1123/usque" rel="noopener">Go implementation of
+              usque</a>, which supports HTTP/2, instead.</td>
             </tr>
             <tr>
               <th scope="row">LuCI</th>
@@ -402,6 +405,15 @@ apk update</code></pre>
               router falls back to normal internet access instead of going offline.</td>
             </tr>
             <tr>
+              <th scope="row">Policy routing</th>
+              <td>While connected, the hook adds a high-priority rule
+              (<code>ip rule add priority 1000 from all lookup main</code>, plus the IPv6 equivalent
+              when IPv6 is enabled) so the <strong>main routing table is authoritative</strong> and
+              traffic actually follows the WARP default route. The rule is removed when the tunnel
+              stops. This also overrides mwan3 policy routing while the tunnel is active — stop the
+              service if you need mwan3's per-WAN policies.</td>
+            </tr>
+            <tr>
               <th scope="row">Endpoint bypass</th>
               <td>A host route to the WARP endpoint IPs via the current WAN gateway is installed
               before the default route changes, so the MASQUE packets can actually reach Cloudflare.</td>
@@ -469,8 +481,7 @@ apk update</code></pre>
             <tr><td><code>usque.main.interface</code></td><td><code>warp0</code></td><td>Name of the TUN interface to create.</td></tr>
             <tr><td><code>usque.main.mtu</code></td><td><code>1400</code></td><td>TUN MTU. Lower it (e.g. <code>1380</code>) for problematic mobile uplinks.</td></tr>
             <tr><td><code>usque.main.ipv6</code></td><td><code>0</code></td><td>Also install an IPv6 default route through the tunnel.</td></tr>
-            <tr><td><code>usque.main.http2</code></td><td><code>0</code></td><td>Use the HTTP/2 transport over TCP/443 instead of QUIC — for networks that block UDP/443. HTTP/2 support is included in the default build.</td></tr>
-            <tr><td><code>usque.main.endpoint_port</code></td><td><code>443</code></td><td>Port used to reach the WARP endpoint.</td></tr>
+            <tr><td><code>usque.main.endpoint_port</code></td><td><code>443</code></td><td>UDP port used to reach the WARP endpoint.</td></tr>
             <tr><td><code>usque.main.always_reconnect</code></td><td><code>1</code></td><td>Reconnect automatically when the tunnel drops.</td></tr>
             <tr><td><code>usque.main.auto_register</code></td><td><code>1</code></td><td>Register a new WARP device automatically if the config file is missing.</td></tr>
             <tr><td><code>usque.main.device_name</code></td><td><code></code> (empty)</td><td>Name used when registering a new device.</td></tr>
@@ -481,7 +492,6 @@ apk update</code></pre>
       <p>Apply a change and restart the daemon:</p>
       <figure class="cmd">
         <pre><code>uci set usque.main.mtu='1380'
-uci set usque.main.http2='1'
 uci commit usque
 /etc/init.d/usque restart</code></pre>
       </figure>
@@ -567,10 +577,12 @@ ubus call luci.usque logs       # recent usque log lines</code></pre>
           <li>Is TUN available? <code>lsmod | grep tun</code> and
           <code>ls -l /dev/net/tun</code>. Install the module with <code>apk add kmod-tun</code> and
           reboot.</li>
-          <li>Is UDP/443 blocked? Test the HTTP/2 fallback: enable it in LuCI or
-          <code>uci set usque.main.http2='1'; uci commit usque; /etc/init.d/usque restart</code>.
-          HTTP/2 support is compiled into the default build; if the option has no effect, check the
-          <a href="#source">release notes</a> for slim variants.</li>
+          <li>Is UDP/443 blocked? The tunnel needs UDP/443 to Cloudflare's WARP endpoints (the
+          config file lists them, e.g. <code>162.159.198.2</code>). Some tethering, hotel, corporate
+          or ISP setups block it. This build is trimmed to QUIC and has no TCP fallback — if UDP is
+          blocked it cannot connect, and you need a WARP client with HTTP/2 support such as the
+          <a href="https://github.com/Diniboy1123/usque" rel="noopener">Go implementation of
+          usque</a>. Check the log for timeouts or connection errors to the endpoint.</li>
         </ol>
       </details>
 
@@ -643,9 +655,10 @@ apk cache clean</code></pre>
 
       <details class="faq">
         <summary>Slow or unstable connection</summary>
-        <p>Try, one change at a time: lower the MTU to <code>1380</code> (mobile uplinks), switch
-        between QUIC and the HTTP/2 fallback, and check CPU load — encryption at a few hundred Mbit/s
-        is a lot for a small router. <code>logread -e usque</code> shows reconnect attempts.</p>
+        <p>Try, one change at a time: lower the MTU to <code>1380</code> (mobile uplinks), check
+        CPU load — encryption at a few hundred Mbit/s is a lot for a small router — and make sure
+        UDP/443 is not throttled or blocked by your ISP. <code>logread -e usque</code> shows
+        reconnect attempts.</p>
       </details>
 
       <details class="faq">
@@ -822,8 +835,9 @@ apk del luci-app-usque usque</code></pre>
 
       <h3>Patches to upstream</h3>
       <p>The vendored client is trimmed and adapted to keep the binary small and make it manage-able by
-      procd/LuCI: TUN mode only (SOCKS5, HTTP proxy, port-forwarding code removed), no BoringSSL
-      (QUIC via <code>ring</code>, which supports 32-bit ARM), non-interactive
+      procd/LuCI: TUN mode only (SOCKS5, HTTP proxy, port-forwarding code removed), QUIC-only
+      transport (the HTTP/2 fallback is removed to save space), no BoringSSL (QUIC via
+      <code>ring</code>, which supports 32-bit ARM), non-interactive
       <code>register --accept-tos --force</code>, and a size-optimised release profile. The
       connect/disconnect hook, init script and LuCI app are added in <code>openwrt/</code>. Details
       are recorded in <a href="https://github.com/fmu/openwrt-usque/blob/main/build/PATCHES.md" rel="noopener"><code>build/PATCHES.md</code></a>
