@@ -213,9 +213,10 @@ apk add luci-app-usque</code></pre>
       <ol class="steps">
         <li>
           <h4>Install the feed's public key</h4>
-          <p><code>apk</code> verifies every repository index against the keys in
-          <code>/etc/apk/keys/</code>. The filename matters: it must be
-          <code>usque.pem</code>.</p>
+          <p><code>apk</code> verifies every repository index against the keys installed in
+          <code>/etc/apk/keys/</code>. In apk v3 the key is matched by its public-key identity, so
+          the filename is not significant; we use <code>usque.pem</code> so it stays recognisable
+          and matches the commands on this page.</p>
           <figure class="cmd">
             <pre><code>wget -O /etc/apk/keys/usque.pem https://fmu.github.io/openwrt-usque/feed/usque.pem</code></pre>
           </figure>
@@ -230,7 +231,10 @@ apk add luci-app-usque</code></pre>
             <pre><code>echo "https://fmu.github.io/openwrt-usque/feed/packages.adb" &gt;&gt; /etc/apk/repositories.d/customfeeds.list</code></pre>
           </figure>
           <p class="fineprint">Running this twice adds the line twice — harmless, but remove
-          duplicates if you want a tidy file.</p>
+          duplicates if you want a tidy file. The URL points directly at the
+          <code>packages.adb</code> index (<code>ndx</code> repository type in apk v3); package
+          files are then fetched from the same <code>/feed/</code> directory, which is why the feed
+          is flat.</p>
         </li>
         <li>
           <h4>Refresh and install</h4>
@@ -551,11 +555,12 @@ ubus call luci.usque logs       # recent usque log lines</code></pre>
 
       <details class="faq">
         <summary>“UNTRUSTED signature” when running apk update / apk add</summary>
-        <p>The index signature does not match the key in <code>/etc/apk/keys/usque.pem</code>.
-        Re-download the key, check the <a href="#trust">fingerprint</a>, make sure the filename is
-        exactly <code>usque.pem</code>, then run <code>apk update</code> again. If the feed was
-        rebuilt with a new key, remove the old key first. The
-        <a href="#install"><code>--allow-untrusted</code> fallback</a> exists only for emergencies.</p>
+        <p>The index signature does not match any key in <code>/etc/apk/keys/</code>. Re-download
+        the key, check the <a href="#trust">fingerprint</a>, and run <code>apk update</code> again.
+        With apk v3 the key is identified by its public-key identity (the filename does not have to
+        be <code>usque.pem</code>, but the key material must match the one the feed was signed
+        with). If the feed was re-keyed, remove the stale key file first. The
+        <a href="#install"><code>--allow-untrusted</code> fallback</a> is a last resort only.</p>
       </details>
 
       <details class="faq">
