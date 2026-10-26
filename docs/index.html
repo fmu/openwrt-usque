@@ -70,7 +70,7 @@
       </div>
       <p class="hero-meta">
         Based on <a href="https://github.com/FireMasterK/usque-rs" rel="noopener">FireMasterK/usque-rs</a>
-        · tested on <strong>ipq40xx</strong> (armv7) with OpenWrt 25.12.6
+        · target <strong>ipq40xx</strong> (armv7), OpenWrt 25.12.6
         · not affiliated with Cloudflare
       </p>
     </div>
@@ -702,8 +702,9 @@ apk del luci-app-usque usque</code></pre>
       <details class="faq">
         <summary>Which routers are supported?</summary>
         <p>Right now the feed only contains <code>arm_cortex-a7_neon-vfpv4</code> packages
-        (<code>ipq40xx/generic</code>), tested on one OpenWrt 25.12.6 device. Other architectures
-        would need their own build — the workflow is in the repository if you want to add one.</p>
+        (<code>ipq40xx/generic</code>) built against OpenWrt 25.12.6. This is the only architecture
+        that is built and exercised so far; other targets would need their own build — the workflow
+        is in the repository if you want to add one.</p>
       </details>
       <details class="faq">
         <summary>Is WARP+ or Zero Trust supported?</summary>
