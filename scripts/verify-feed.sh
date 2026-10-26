@@ -114,6 +114,10 @@ make_dummy() {
 		--files "$WORK/empty" \
 		--output "$VERIFY/$name-0.0.1-r0.apk" >/dev/null
 }
+# OpenWrt adds an implicit libc dependency to every package; the target
+# feed supplies it, so provide a dummy here as well.
+make_dummy libc
+make_dummy libgcc
 make_dummy kmod-tun
 make_dummy luci-base
 
