@@ -63,6 +63,7 @@ define Build/Compile
 		exit 1; \
 	fi
 	@echo "usque binary: $$(stat -c '%s' "$(USQUE_BIN)" 2>/dev/null || stat -f '%z' "$(USQUE_BIN)") bytes"
+endef
 
 define Package/usque/install
 	$(INSTALL_DIR) $(1)/usr/bin
