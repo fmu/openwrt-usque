@@ -7,7 +7,9 @@
 #   firewall.usque       zone: name usque, device <iface>, input REJECT,
 #                              output ACCEPT, forward REJECT, masq, masq6,
 #                              mtu_fix
-#   firewall.usque_lan   forwarding: lan -> usque
+#   firewall.usque_<z>   forwarding <z> -> usque for every internal zone <z>
+#                        that forwards to wan (lan, guest, ...); lan is always
+#                        included.
 #
 # Usage: firewall setup [iface]   (idempotent; reloads fw4 only on changes)
 #        firewall teardown        (idempotent)
@@ -15,7 +17,6 @@
 # The existing WAN zone is never touched.
 
 ZONE=usque
-FWD=usque_lan
 changed=0
 
 log() { logger -t usque "firewall: $*"; }
@@ -31,8 +32,37 @@ fw4_reload() {
 zone_get() { uci -q get "firewall.$ZONE.$1" 2>/dev/null; }
 zone_set() { uci set "firewall.$ZONE.$1=$2" && changed=1; }
 
+# Names of zones that have a forwarding rule to wan (one per line).
+wan_forward_sources() {
+	uci -q show firewall 2>/dev/null | while IFS= read -r line; do
+		case "$line" in
+			*".dest='wan'"*|*".dest=wan"*)
+				rest="${line#firewall.}"
+				sec="${rest%%.*}"
+				[ -n "$sec" ] || continue
+				src="$(uci -q get "firewall.$sec.src" 2>/dev/null)" || continue
+				case "$src" in
+					''|wan|'@'*) continue ;;
+				esac
+				printf '%s\n' "$src"
+				;;
+		esac
+	done
+}
+
+# Union of "lan" and every zone forwarding to wan, deduplicated.
+internal_zones() {
+	{
+		printf 'lan\n'
+		wan_forward_sources
+	} | while IFS= read -r z; do
+		case "$z" in ''|*[!A-Za-z0-9_]*) continue ;; esac
+		printf '%s\n' "$z"
+	done | sort -u
+}
+
 setup() {
-	local iface="${1:-warp0}"
+	local iface="${1:-warp0}" src fwd
 
 	if ! uci -q get "firewall.$ZONE" >/dev/null 2>&1; then
 		uci set "firewall.$ZONE=zone"
@@ -49,12 +79,19 @@ setup() {
 
 	[ "$(zone_get device)" = "$iface" ] || zone_set device "$iface"
 
-	if ! uci -q get "firewall.$FWD" >/dev/null 2>&1; then
-		uci set "firewall.$FWD=forwarding"
-		uci set "firewall.$FWD.src=lan"
-		uci set "firewall.$FWD.dest=$ZONE"
-		changed=1
-	fi
+	# Every internal zone that may forward to the internet must be allowed
+	# to forward into the tunnel as well, otherwise LAN/guest clients lose
+	# internet access while the tunnel is up.
+	for src in $(internal_zones); do
+		fwd="${ZONE}_${src}"
+		if ! uci -q get "firewall.$fwd" >/dev/null 2>&1; then
+			uci set "firewall.$fwd=forwarding"
+			uci set "firewall.$fwd.src=$src"
+			uci set "firewall.$fwd.dest=$ZONE"
+			changed=1
+			log "added forwarding $src -> $ZONE"
+		fi
+	done
 
 	if [ "$changed" = 1 ]; then
 		uci commit firewall
@@ -66,15 +103,19 @@ setup() {
 }
 
 teardown() {
-	if uci -q get "firewall.$FWD" >/dev/null 2>&1; then
-		uci delete "firewall.$FWD" && changed=1
-	fi
+	local sec
+
+	# Remove all forwarding sections we created (firewall.usque_*).
+	for sec in $(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\(${ZONE}_[A-Za-z0-9_]*\)=.*/\1/p"); do
+		uci delete "firewall.$sec" && changed=1
+	done
 	if uci -q get "firewall.$ZONE" >/dev/null 2>&1; then
 		uci delete "firewall.$ZONE" && changed=1
 	fi
+
 	if [ "$changed" = 1 ]; then
 		uci commit firewall
-		log "zone '$ZONE' removed"
+		log "zone '$ZONE' and its forwardings removed"
 		fw4_reload
 	else
 		log "zone '$ZONE' not present, nothing to remove"

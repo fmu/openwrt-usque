@@ -22,7 +22,6 @@ load_config() {
 	config_get interface main interface warp0
 	config_get mtu main mtu 1400
 	config_get_bool ipv6 main ipv6 0
-	config_get_bool http2 main http2 0
 	config_get endpoint_port main endpoint_port 443
 	config_get_bool always_reconnect main always_reconnect 1
 	config_get_bool auto_register main auto_register 1
@@ -89,7 +88,6 @@ start_service() {
 		-n "$interface" -m "$mtu" -P "$endpoint_port" \
 		--on-connect "$HOOK" --on-disconnect "$HOOK"
 	[ "$ipv6" = 1 ] && procd_append_param command --ipv6
-	[ "$http2" = 1 ] && procd_append_param command --http2
 	[ "$always_reconnect" = 1 ] && procd_append_param command --always-reconnect
 	procd_set_param env \
 		PATH=/usr/sbin:/usr/bin:/sbin:/bin \
@@ -102,7 +100,7 @@ start_service() {
 	procd_set_param stderr 1
 	procd_close_instance
 
-	log "started: iface=$interface mtu=$mtu ipv6=$ipv6 http2=$http2 endpoint_port=$endpoint_port"
+	log "started: iface=$interface mtu=$mtu ipv6=$ipv6 endpoint_port=$endpoint_port"
 }
 
 stop_service() {
@@ -121,8 +119,20 @@ stop_service() {
 	fi
 
 	# Fallback in case the hook was missing or failed.
-	ip -4 route del default dev "$interface" metric 0 >/dev/null 2>&1 || true
+	ip route del default dev "$interface" metric 0 >/dev/null 2>&1 || true
 	ip -6 route del default dev "$interface" metric 0 >/dev/null 2>&1 || true
+	# Remove the policy-routing override (mwan3) if the hook left it behind.
+	if [ -f "$STATE_DIR/iprules" ]; then
+		while read -r fam prio; do
+			[ -n "$fam" ] && [ -n "$prio" ] || continue
+			if [ "$fam" = 6 ]; then
+				ip -6 rule del priority "$prio" >/dev/null 2>&1 || true
+			else
+				ip rule del priority "$prio" >/dev/null 2>&1 || true
+			fi
+		done < "$STATE_DIR/iprules"
+		rm -f "$STATE_DIR/iprules"
+	fi
 
 	log "stopped"
 }

@@ -38,25 +38,52 @@ done
 cmp -s "$PUB_KEY" "$FEED_DIR/usque.pem" || die "feed usque.pem does not match $PUB_KEY"
 printf 'public key sha256: %s\n' "$(sha256sum "$FEED_DIR/usque.pem" | cut -d' ' -f1)"
 
-log "Index contents (apk adbdump)"
-"$APK" adbdump "$FEED_DIR/packages.adb" > "$WORK/packages.txt"
-grep -E '^\s+(name|version|arch|depends|provides):' "$WORK/packages.txt" || true
+log "Index contents (apk adbdump --format json)"
+"$APK" adbdump --format json "$FEED_DIR/packages.adb" > "$WORK/packages.json"
+python3 - "$WORK/packages.json" "$ARCH" <<'PY'
+import json
+import sys
 
-# adbdump prints one "- name: ..." block per package; extract name/arch pairs.
-awk '
-	/^  - name:/ { name = $3 }
-	/^    arch:/ { print name, $2 }
-' "$WORK/packages.txt" > "$WORK/archs.txt" || true
-printf '\npackage architectures:\n'
-cat "$WORK/archs.txt" || true
-grep -q '^usque ' "$WORK/archs.txt" || die "usque missing from index"
-grep -q "^usque $ARCH\$" "$WORK/archs.txt" || die "usque has wrong arch (expected $ARCH)"
-grep -q '^luci-app-usque noarch$' "$WORK/archs.txt" || die "luci-app-usque has wrong arch (expected noarch)"
-grep -q 'kmod-tun' "$WORK/packages.txt" || die "usque does not depend on kmod-tun"
+data = json.load(open(sys.argv[1]))
+pkgs = data["packages"] if isinstance(data, dict) and "packages" in data else data
+assert isinstance(pkgs, list) and pkgs, pkgs
+
+
+def depnames(pkg):
+    out = []
+    for dep in pkg.get("depends", []):
+        out.append(dep if isinstance(dep, str) else dep.get("name", ""))
+    return out
+
+
+by_name = {pkg["name"]: pkg for pkg in pkgs}
+for name in sorted(by_name):
+    pkg = by_name[name]
+    print("%-18s version=%-10s arch=%-26s depends=%s"
+          % (name, pkg.get("version"), pkg.get("arch"), " ".join(depnames(pkg))))
+
+assert "usque" in by_name, "usque missing from index"
+usque = by_name["usque"]
+assert usque.get("arch") == sys.argv[2], \
+    "usque arch %r != %r" % (usque.get("arch"), sys.argv[2])
+assert "kmod-tun" in depnames(usque), \
+    "usque does not depend on kmod-tun: %r" % depnames(usque)
+assert str(usque.get("version", "")).startswith("0.1.0"), usque.get("version")
+
+assert "luci-app-usque" in by_name, "luci-app-usque missing from index"
+luci = by_name["luci-app-usque"]
+assert luci.get("arch") == "noarch", "luci-app-usque arch %r" % luci.get("arch")
+assert "luci-base" in depnames(luci), depnames(luci)
+assert "usque" in depnames(luci), depnames(luci)
+
+print("OK: package metadata is sane")
+PY
 
 log "index.json"
 python3 - "$FEED_DIR/index.json" "$ARCH" <<'PY'
-import json, sys
+import json
+import sys
+
 idx = json.load(open(sys.argv[1]))
 assert idx["architecture"] == sys.argv[2], idx
 assert idx["version"] == 2, idx
@@ -115,11 +142,12 @@ log "Positive test: install both packages into a throw-away root"
 ROOT="$WORK/root"
 mkdir -p "$ROOT/etc/apk/keys"
 install -m 0644 "$FEED_DIR/usque.pem" "$ROOT/etc/apk/keys/usque.pem"
+INSTALL_PKGS="luci-app-usque"
 "$APK" --root "$ROOT" --force-no-chroot --arch "$ARCH" \
 	--repositories-file /dev/null \
 	--repository "file://$VERIFY/packages.adb" \
 	--keys-dir etc/apk/keys \
-	--no-scripts --no-cache --initdb add luci-app-usque
+	--no-scripts --no-cache --initdb add $INSTALL_PKGS
 echo "OK: signed index trusted, packages installed"
 
 log "Installed files"
@@ -129,6 +157,10 @@ log "Installed files"
 [ -f "$ROOT/etc/config/usque" ] || die "installed root is missing /etc/config/usque"
 [ -x "$ROOT/usr/libexec/usque/hook" ] || die "installed root is missing /usr/libexec/usque/hook"
 [ -x "$ROOT/usr/libexec/usque/firewall" ] || die "installed root is missing /usr/libexec/usque/firewall"
+[ -f "$ROOT/www/luci-static/resources/view/usque/overview.js" ] || die "installed root is missing the LuCI view"
+[ -f "$ROOT/usr/share/luci/menu.d/luci-app-usque.json" ] || die "installed root is missing the LuCI menu entry"
+[ -f "$ROOT/usr/share/rpcd/acl.d/luci-app-usque.json" ] || die "installed root is missing the LuCI ACL"
+[ -x "$ROOT/usr/libexec/rpcd/luci.usque" ] || die "installed root is missing the rpcd backend"
 
 log "apk metadata"
 "$APK" --root "$ROOT" --force-no-chroot --repositories-file /dev/null info || true
@@ -153,7 +185,7 @@ report_size() {
 	printf '%-18s compressed=%8s bytes  installed=%8s bytes\n' "$name" "$compressed" "$installed"
 	rm -f "$files"
 }
-for pkg in usque luci-app-usque; do
+for pkg in $INSTALL_PKGS; do
 	report_size "$pkg" "$ROOT"
 done
 

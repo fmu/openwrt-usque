@@ -82,11 +82,24 @@ log "Running make defconfig"
 export DEVELOPER=1
 make defconfig
 
-TARGETS="package/usque/compile"
-[ "$BUILD_LUCI" = 1 ] && TARGETS="$TARGETS package/luci-app-usque/compile"
+# Build each package by invoking its own sub-make, exactly like the OpenWrt
+# build system does (`make -C package/<dir> compile`).  Going through the
+# top-level `package/<dir>/compile` target in an SDK pulls in the kernel
+# module / toolchain package build, which cannot work in an SDK (there is no
+# kernel build tree).
+build_pkg() {
+	local dir="$1"
+	log "Building package/$dir"
+	(
+		cd "$SDK_DIR"
+		env TOPDIR="$SDK_DIR" SDK=1 OPENWRT_BUILD=1 DEVELOPER=1 \
+			PATH="$SDK_DIR/staging_dir/host/bin:$PATH" \
+			make -C "package/$dir" compile V=s
+	)
+}
 
-log "Building: $TARGETS"
-make -j"$JOBS" $TARGETS V=s
+build_pkg usque
+[ "$BUILD_LUCI" = 1 ] && build_pkg luci-app-usque
 
 # ---------------------------------------------------------------------------
 # 3. Collect the .apk files.

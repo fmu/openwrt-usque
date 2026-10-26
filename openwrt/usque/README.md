@@ -26,7 +26,6 @@ produced by `build/build-usque.sh` at the repository root and copied to
 | `interface` | `warp0` | TUN interface name |
 | `mtu` | `1400` | TUN MTU |
 | `ipv6` | `0` | enable IPv6 on the tunnel and install an IPv6 default route |
-| `http2` | `0` | use HTTP/2 transport instead of QUIC/MASQUE |
 | `endpoint_port` | `443` | WARP endpoint port |
 | `always_reconnect` | `1` | keep reconnecting in the background |
 | `auto_register` | `1` | register a new WARP device if `config_file` is missing |
@@ -47,15 +46,23 @@ On connect the hook (`/usr/libexec/usque/hook`):
 3. installs `default dev <interface> metric 0` for IPv4 (and IPv6 when
    enabled).
 
-On disconnect it removes the endpoint bypass and tunnel default route(s) and
-restores the saved WAN default route if none is left, so the router always has
-a working default route (SSH does not break).
+It also installs `ip rule priority 1000 from all lookup main` (and the IPv6
+equivalent when IPv6 is enabled).  Without it, policy routing installed by
+`mwan3` (or any other fwmark/VPN policy rule) is evaluated before the main
+table and silently diverts traffic away from the tunnel, leaving the tunnel up
+but unused.
+
+On disconnect it removes the policy rule, the endpoint bypass and tunnel
+default route(s) and restores the saved WAN default route if none is left, so
+the router always has a working default route (SSH does not break).
 
 The firewall helper creates a dedicated fw4 zone (`firewall.usque`, device
 `<interface>`, `input REJECT`, `output ACCEPT`, `forward REJECT`, `masq`,
-`masq6`, `mtu_fix`) plus `firewall.usque_lan` forwarding `lan -> usque`. The
-existing WAN zone is never modified. The zone is removed by the package
-`prerm` script.
+`masq6`, `mtu_fix`) plus a `firewall.usque_<zone>` forwarding rule for every
+internal zone that forwards to `wan` (always including `lan`, and e.g. `guest`
+when present), so LAN/guest clients keep internet access while the tunnel is
+up. The existing WAN zone is never modified. The zone and its forwardings are
+removed by the package `prerm` script.
 
 ## Building
 

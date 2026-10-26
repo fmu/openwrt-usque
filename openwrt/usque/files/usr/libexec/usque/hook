@@ -12,11 +12,15 @@
 # On connect:
 #   1. remember the current (WAN) default routes so they can be restored,
 #   2. install a host route for the WARP endpoint via the current WAN,
-#   3. install "default dev <iface> metric 0" for IPv4 (and IPv6 if enabled).
+#   3. install "default dev <iface> metric 0" for IPv4 (and IPv6 if enabled),
+#   4. install "ip rule priority 1000 from all lookup main" (and -6) so that
+#      policy routing (mwan3, VPN policy rules) cannot divert traffic away
+#      from the main table, where the tunnel default route lives.
 # On disconnect:
-#   1. remove the endpoint host route(s),
-#   2. remove the tunnel default route(s),
-#   3. restore the saved WAN default route(s) if none is left.
+#   1. remove the priority-1000 policy rules,
+#   2. remove the endpoint host route(s),
+#   3. remove the tunnel default route(s),
+#   4. restore the saved WAN default route(s) if none is left.
 #
 # The script is intentionally idempotent and never uses "set -e": a failure
 # must not leave the router without a default route (SSH would break).
@@ -24,6 +28,8 @@
 STATE_DIR="${USQUE_STATE_DIR:-/var/run/usque}"
 LOG_TAG=usque
 RETRIES=5
+POLICY_PRIO=1000
+POLICY_STATE="$STATE_DIR/iprules"
 
 log() { logger -t "$LOG_TAG" "hook: $*"; }
 
@@ -41,6 +47,17 @@ esac
 
 # --- helpers ---------------------------------------------------------------
 
+# Run an ip command for the given address family.  IPv4 uses the plain
+# commands (no -4 flag) for maximum busybox compatibility.
+ip_cmd() {
+	local fam="$1"; shift
+	if [ "$fam" = 6 ]; then
+		ip -6 "$@"
+	else
+		ip "$@"
+	fi
+}
+
 # Split "1.2.3.4:443", "[2606:...]:443" or bare IPv6 into EP_IP / EP_FAM.
 endpoint_split() {
 	EP_IP=''
@@ -52,16 +69,6 @@ endpoint_split() {
 		*:*)     EP_IP="${1%:*}"; EP_FAM=4 ;;
 		*)       EP_IP="$1" ;;
 	esac
-}
-
-ip_cmd() {
-	# $1 = 4|6, remaining = args
-	local fam="$1"; shift
-	if [ "$fam" = 6 ]; then
-		ip -6 "$@"
-	else
-		ip -4 "$@"
-	fi
 }
 
 # Print default routes without volatile tokens that "ip route replace" would
@@ -87,10 +94,10 @@ save_wan_defaults() {
 
 # Find the current route to the endpoint; sets RG_VIA and RG_DEV.
 route_get() {
-	local fam="$1" ip="$2" out
+	local fam="$1" ipaddr="$2" out
 	RG_VIA=''
 	RG_DEV=''
-	out="$(ip_cmd "$fam" route get "$ip" 2>/dev/null)" || return 1
+	out="$(ip_cmd "$fam" route get "$ipaddr" 2>/dev/null)" || return 1
 	[ -n "$out" ] || return 1
 	# shellcheck disable=SC2086
 	set -- $out
@@ -106,36 +113,36 @@ route_get() {
 }
 
 add_endpoint_bypass() {
-	local fam="$1" ip="$2" dev="$3" via="$4" pfx=32 cur
+	local fam="$1" ipaddr="$2" dev="$3" via="$4" pfx=32 cur
 	[ "$fam" = 6 ] && pfx=128
-	cur="$(ip_cmd "$fam" route show "$ip/$pfx" 2>/dev/null)"
+	cur="$(ip_cmd "$fam" route show "$ipaddr/$pfx" 2>/dev/null)"
 	if [ -n "$cur" ]; then
-		log "endpoint route $ip/$pfx already present, leaving it alone"
+		log "endpoint route $ipaddr/$pfx already present, leaving it alone"
 		return 0
 	fi
 	if [ -n "$via" ]; then
-		ip_cmd "$fam" route replace "$ip/$pfx" via "$via" dev "$dev" 2>/dev/null \
-			|| { log "failed to add bypass $ip/$pfx via $via dev $dev"; return 1; }
+		ip_cmd "$fam" route replace "$ipaddr/$pfx" via "$via" dev "$dev" 2>/dev/null \
+			|| { log "failed to add bypass $ipaddr/$pfx via $via dev $dev"; return 1; }
 	else
-		ip_cmd "$fam" route replace "$ip/$pfx" dev "$dev" 2>/dev/null \
-			|| { log "failed to add bypass $ip/$pfx dev $dev"; return 1; }
+		ip_cmd "$fam" route replace "$ipaddr/$pfx" dev "$dev" 2>/dev/null \
+			|| { log "failed to add bypass $ipaddr/$pfx dev $dev"; return 1; }
 	fi
-	printf '%s %s %s\n' "$fam" "$ip" "$dev" >> "$STATE_DIR/endpoints"
-	log "endpoint bypass: $ip/$pfx via ${via:-onlink} dev $dev"
+	printf '%s %s %s\n' "$fam" "$ipaddr" "$dev" >> "$STATE_DIR/endpoints"
+	log "endpoint bypass: $ipaddr/$pfx via ${via:-onlink} dev $dev"
 	return 0
 }
 
 del_endpoint_bypass() {
-	local fam ip dev pfx
+	local fam ipaddr dev pfx
 	[ -f "$STATE_DIR/endpoints" ] || return 0
-	while read -r fam ip dev; do
-		[ -n "$fam" ] && [ -n "$ip" ] && [ -n "$dev" ] || continue
+	while read -r fam ipaddr dev; do
+		[ -n "$fam" ] && [ -n "$ipaddr" ] && [ -n "$dev" ] || continue
 		pfx=32
 		[ "$fam" = 6 ] && pfx=128
-		ip_cmd "$fam" route del "$ip/$pfx" dev "$dev" 2>/dev/null \
-			|| ip_cmd "$fam" route del "$ip/$pfx" 2>/dev/null \
+		ip_cmd "$fam" route del "$ipaddr/$pfx" dev "$dev" 2>/dev/null \
+			|| ip_cmd "$fam" route del "$ipaddr/$pfx" 2>/dev/null \
 			|| true
-		log "removed endpoint bypass $ip/$pfx dev $dev"
+		log "removed endpoint bypass $ipaddr/$pfx dev $dev"
 	done < "$STATE_DIR/endpoints"
 	rm -f "$STATE_DIR/endpoints"
 }
@@ -167,6 +174,49 @@ del_default_routes() {
 		ip_cmd "$fam" route del default dev "$IFACE" metric 0 2>/dev/null && \
 			log "removed IPv$fam default route dev $IFACE metric 0"
 	done
+}
+
+# --- policy routing override (mwan3 and friends) ---------------------------
+
+record_policy_rule() {
+	local fam="$1"
+	[ -f "$POLICY_STATE" ] && grep -qx "$fam $POLICY_PRIO" "$POLICY_STATE" && return 0
+	printf '%s %s\n' "$fam" "$POLICY_PRIO" >> "$POLICY_STATE"
+}
+
+add_policy_rules() {
+	local fam
+	for fam in 4 6; do
+		if [ "$fam" = 6 ] && [ "$IPV6_ENABLED" = 0 ]; then
+			continue
+		fi
+		# Prefer "add": it fails cleanly if the rule is already there.
+		if ip_cmd "$fam" rule add priority "$POLICY_PRIO" from all lookup main 2>/dev/null; then
+			log "installed IPv$fam policy rule: priority $POLICY_PRIO from all lookup main"
+			record_policy_rule "$fam"
+			continue
+		fi
+		if ip_cmd "$fam" rule show 2>/dev/null | grep -q "^$POLICY_PRIO:.*lookup main"; then
+			log "IPv$fam policy rule priority $POLICY_PRIO already present"
+			record_policy_rule "$fam"
+		else
+			log "could not install IPv$fam policy rule priority $POLICY_PRIO (policy routing may still divert traffic)"
+		fi
+	done
+}
+
+del_policy_rules() {
+	local fam prio
+	[ -f "$POLICY_STATE" ] || return 0
+	while read -r fam prio; do
+		[ -n "$fam" ] && [ -n "$prio" ] || continue
+		if ip_cmd "$fam" rule del priority "$prio" 2>/dev/null; then
+			log "removed IPv$fam policy rule priority $prio"
+		else
+			log "IPv$fam policy rule priority $prio already gone"
+		fi
+	done < "$POLICY_STATE"
+	rm -f "$POLICY_STATE"
 }
 
 restore_wan_defaults() {
@@ -227,9 +277,13 @@ do_connect() {
 	fi
 
 	add_default_routes
+	add_policy_rules
 }
 
 do_disconnect() {
+	# Restore policy routing first: if anything below fails, traffic falls
+	# back to the WAN instead of a dead tunnel.
+	del_policy_rules
 	del_endpoint_bypass
 	del_default_routes
 	restore_wan_defaults
