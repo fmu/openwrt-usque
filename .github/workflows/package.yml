@@ -1,0 +1,183 @@
+name: Package feed
+
+# Builds the usque / luci-app-usque apk packages for OpenWrt 25.12
+# (ipq40xx/generic, arm_cortex-a7_neon-vfpv4) with the OpenWrt SDK and
+# assembles a signed apk-tools 3 feed:
+#
+#   feed/usque-<version>.apk
+#   feed/luci-app-usque-<version>.apk
+#   feed/packages.adb     (signed with the repo's EC P-256 key)
+#   feed/index.json
+#   feed/usque.pem        (public key, byte-identical to keys/usque.pem)
+#
+# The feed is uploaded as artifact "apk-feed" (or "apk-feed-dummy" for the
+# packaging smoke test that uses a placeholder binary).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "openwrt/**"
+      - "scripts/**"
+      - "build/**"
+      - "keys/**"
+      - ".github/workflows/package.yml"
+  pull_request:
+    paths:
+      - "openwrt/**"
+      - "scripts/**"
+      - "build/**"
+      - "keys/**"
+      - ".github/workflows/package.yml"
+  workflow_dispatch:
+    inputs:
+      dummy_binary:
+        description: "Packaging smoke test: use a placeholder binary instead of building usque"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_VERSION: "25.12.6"
+  SDK_URL: "https://downloads.openwrt.org/releases/25.12.6/targets/ipq40xx/generic/openwrt-sdk-25.12.6-ipq40xx-generic_gcc-14.3.0_musl_eabi.Linux-x86_64.tar.zst"
+  ARCH: arm_cortex-a7_neon-vfpv4
+
+jobs:
+  hook-route-test:
+    name: Routing hook tests (netns)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install test prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq iproute2
+
+      - name: Run hook route tests in a network namespace
+        run: sudo -E bash scripts/test-hook.sh openwrt/usque/files/usr/libexec/usque/hook
+
+  package:
+    name: Build packages + signed feed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host build prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential zstd rsync file curl
+
+      - name: Build usque binary (armv7 musl)
+        if: ${{ !inputs.dummy_binary }}
+        run: |
+          set -euo pipefail
+          if [ ! -x build/build-usque.sh ]; then
+            echo "::error::build/build-usque.sh is missing (builder deliverable); use the dummy_binary input to test packaging only"
+            exit 1
+          fi
+          ./build/build-usque.sh
+          ls -l dist/usque
+          file dist/usque
+
+      - name: Create placeholder binary (packaging smoke test)
+        if: ${{ inputs.dummy_binary }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # /bin/true is an ELF binary; the package build only checks the ELF
+          # magic, and the feed verification installs it into a throw-away root.
+          cp /bin/true dist/usque
+          chmod 0755 dist/usque
+          echo "::warning::using a placeholder binary (packaging smoke test) - artifact is apk-feed-dummy"
+          ls -l dist/usque
+
+      - name: Cache OpenWrt SDK tarball
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/openwrt-sdk
+          key: openwrt-sdk-${{ env.SDK_VERSION }}-ipq40xx-generic-gcc14.3.0-musl
+
+      - name: Download and extract SDK
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.cache/openwrt-sdk sdk
+          if [ ! -s ~/.cache/openwrt-sdk/sdk.tar.zst ]; then
+            curl -fSL --retry 3 --retry-delay 5 -o ~/.cache/openwrt-sdk/sdk.tar.zst "$SDK_URL"
+          fi
+          ls -l ~/.cache/openwrt-sdk/sdk.tar.zst
+          tar --zstd -xf ~/.cache/openwrt-sdk/sdk.tar.zst -C sdk --strip-components=1
+          ls sdk/rules.mk sdk/staging_dir/host/bin/apk
+
+      - name: Write signing key and check it matches keys/usque.pem
+        env:
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APK_SIGN_KEY:-}" ]; then
+            echo "::error::secret APK_SIGN_KEY is not set"
+            exit 1
+          fi
+          printf '%s\n' "$APK_SIGN_KEY" > .signing-key.pem
+          chmod 600 .signing-key.pem
+          openssl ec -in .signing-key.pem -pubout -out derived-pub.pem 2>/dev/null
+          if ! cmp -s derived-pub.pem keys/usque.pem; then
+            echo "::error::APK_SIGN_KEY does not match keys/usque.pem"
+            diff -u keys/usque.pem derived-pub.pem || true
+            exit 1
+          fi
+          echo "signing key matches keys/usque.pem"
+          rm -f derived-pub.pem
+
+      - name: Build packages and assemble signed feed
+        env:
+          SDK_DIR: ${{ github.workspace }}/sdk
+          REPO_DIR: ${{ github.workspace }}
+          OUT_DIR: ${{ github.workspace }}/feed
+          USQUE_BIN: ${{ github.workspace }}/dist/usque
+          SIGN_KEY: ${{ github.workspace }}/.signing-key.pem
+          PUB_KEY: ${{ github.workspace }}/keys/usque.pem
+          ARCH: ${{ env.ARCH }}
+        run: bash scripts/build-feed.sh
+
+      - name: Verify feed with host apk (signature trust, install, sizes)
+        env:
+          SDK_DIR: ${{ github.workspace }}/sdk
+          FEED_DIR: ${{ github.workspace }}/feed
+          PUB_KEY: ${{ github.workspace }}/keys/usque.pem
+          SIGN_KEY: ${{ github.workspace }}/.signing-key.pem
+          ARCH: ${{ env.ARCH }}
+        run: bash scripts/verify-feed.sh
+
+      - name: Package summary
+        run: |
+          set -euo pipefail
+          {
+            echo "### apk feed"
+            echo
+            echo "| file | size |"
+            echo "| --- | ---: |"
+            for f in feed/*; do
+              echo "| $(basename "$f") | $(stat -c '%s' "$f") bytes |"
+            done
+            echo
+            echo "Architecture: $ARCH, SDK $SDK_VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f .signing-key.pem
+
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.dummy_binary && 'apk-feed-dummy' || 'apk-feed' }}
+          path: feed/
+          if-no-files-found: error
+          retention-days: 30

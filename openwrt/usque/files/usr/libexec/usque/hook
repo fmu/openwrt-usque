@@ -1,0 +1,245 @@
+#!/bin/sh
+# usque routing hook
+#
+# Invoked by the usque daemon with the following environment:
+#   USQUE_EVENT    connect | disconnect
+#   USQUE_IFACE    tunnel interface name (e.g. warp0)
+#   USQUE_IPV4     tunnel IPv4 address
+#   USQUE_IPV6     tunnel IPv6 address
+#   USQUE_ENDPOINT WARP endpoint as ip:port or [ipv6]:port
+# and by /etc/init.d/usque stop (USQUE_EVENT=disconnect).
+#
+# On connect:
+#   1. remember the current (WAN) default routes so they can be restored,
+#   2. install a host route for the WARP endpoint via the current WAN,
+#   3. install "default dev <iface> metric 0" for IPv4 (and IPv6 if enabled).
+# On disconnect:
+#   1. remove the endpoint host route(s),
+#   2. remove the tunnel default route(s),
+#   3. restore the saved WAN default route(s) if none is left.
+#
+# The script is intentionally idempotent and never uses "set -e": a failure
+# must not leave the router without a default route (SSH would break).
+
+STATE_DIR="${USQUE_STATE_DIR:-/var/run/usque}"
+LOG_TAG=usque
+RETRIES=5
+
+log() { logger -t "$LOG_TAG" "hook: $*"; }
+
+mkdir -p "$STATE_DIR" 2>/dev/null
+
+IFACE="${USQUE_IFACE:-}"
+EVENT="${USQUE_EVENT:-}"
+ENDPOINT="${USQUE_ENDPOINT:-}"
+IPV6_ENABLED="${USQUE_IPV6_ENABLED:-}"
+
+[ -n "$IFACE" ] || { log "USQUE_IFACE not set, nothing to do"; exit 0; }
+case "$IFACE" in
+	*[!A-Za-z0-9_.-]*) log "invalid interface name '$IFACE', refusing"; exit 0 ;;
+esac
+
+# --- helpers ---------------------------------------------------------------
+
+# Split "1.2.3.4:443", "[2606:...]:443" or bare IPv6 into EP_IP / EP_FAM.
+endpoint_split() {
+	EP_IP=''
+	EP_FAM=4
+	case "$1" in
+		\[*\]:*) EP_IP="${1%]:*}"; EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
+		\[*\])   EP_IP="${1%]}";  EP_IP="${EP_IP#[}"; EP_FAM=6 ;;
+		*:*:*:*) EP_IP="$1"; EP_FAM=6 ;;
+		*:*)     EP_IP="${1%:*}"; EP_FAM=4 ;;
+		*)       EP_IP="$1" ;;
+	esac
+}
+
+ip_cmd() {
+	# $1 = 4|6, remaining = args
+	local fam="$1"; shift
+	if [ "$fam" = 6 ]; then
+		ip -6 "$@"
+	else
+		ip -4 "$@"
+	fi
+}
+
+# Print default routes without volatile tokens that "ip route replace" would
+# not accept (e.g. "expires 1799sec", "linkdown").
+sanitize_routes() {
+	while IFS= read -r line; do
+		line="$(printf '%s\n' "$line" | sed -e 's/ expires [0-9]*sec//g' \
+			-e 's/ linkdown//g' -e 's/ dead//g' -e 's/ offload//g' \
+			-e 's/ trap//g' -e 's/ notify//g')"
+		[ -n "$line" ] && printf '%s\n' "$line"
+	done
+}
+
+save_wan_defaults() {
+	local fam file
+	for fam in 4 6; do
+		file="$STATE_DIR/wan-default-v$fam"
+		[ -e "$file" ] && continue
+		ip_cmd "$fam" route show default 2>/dev/null | sanitize_routes > "$file"
+		[ -s "$file" ] || rm -f "$file"
+	done
+}
+
+# Find the current route to the endpoint; sets RG_VIA and RG_DEV.
+route_get() {
+	local fam="$1" ip="$2" out
+	RG_VIA=''
+	RG_DEV=''
+	out="$(ip_cmd "$fam" route get "$ip" 2>/dev/null)" || return 1
+	[ -n "$out" ] || return 1
+	# shellcheck disable=SC2086
+	set -- $out
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			via) RG_VIA="$2"; shift 2 ;;
+			dev) RG_DEV="$2"; shift 2 ;;
+			*) shift ;;
+		esac
+	done
+	[ -n "$RG_DEV" ] || return 1
+	return 0
+}
+
+add_endpoint_bypass() {
+	local fam="$1" ip="$2" dev="$3" via="$4" pfx=32 cur
+	[ "$fam" = 6 ] && pfx=128
+	cur="$(ip_cmd "$fam" route show "$ip/$pfx" 2>/dev/null)"
+	if [ -n "$cur" ]; then
+		log "endpoint route $ip/$pfx already present, leaving it alone"
+		return 0
+	fi
+	if [ -n "$via" ]; then
+		ip_cmd "$fam" route replace "$ip/$pfx" via "$via" dev "$dev" 2>/dev/null \
+			|| { log "failed to add bypass $ip/$pfx via $via dev $dev"; return 1; }
+	else
+		ip_cmd "$fam" route replace "$ip/$pfx" dev "$dev" 2>/dev/null \
+			|| { log "failed to add bypass $ip/$pfx dev $dev"; return 1; }
+	fi
+	printf '%s %s %s\n' "$fam" "$ip" "$dev" >> "$STATE_DIR/endpoints"
+	log "endpoint bypass: $ip/$pfx via ${via:-onlink} dev $dev"
+	return 0
+}
+
+del_endpoint_bypass() {
+	local fam ip dev pfx
+	[ -f "$STATE_DIR/endpoints" ] || return 0
+	while read -r fam ip dev; do
+		[ -n "$fam" ] && [ -n "$ip" ] && [ -n "$dev" ] || continue
+		pfx=32
+		[ "$fam" = 6 ] && pfx=128
+		ip_cmd "$fam" route del "$ip/$pfx" dev "$dev" 2>/dev/null \
+			|| ip_cmd "$fam" route del "$ip/$pfx" 2>/dev/null \
+			|| true
+		log "removed endpoint bypass $ip/$pfx dev $dev"
+	done < "$STATE_DIR/endpoints"
+	rm -f "$STATE_DIR/endpoints"
+}
+
+add_default_routes() {
+	local fam
+	for fam in 4 6; do
+		if [ "$fam" = 6 ]; then
+			if [ "$IPV6_ENABLED" = 0 ]; then
+				log "IPv6 disabled, not installing an IPv6 default route"
+				continue
+			fi
+			if ! ip -6 addr show dev "$IFACE" scope global 2>/dev/null | grep -q 'inet6'; then
+				log "no global IPv6 address on $IFACE, not installing an IPv6 default route"
+				continue
+			fi
+		fi
+		if ip_cmd "$fam" route replace default dev "$IFACE" metric 0 2>/dev/null; then
+			log "installed IPv$fam default route dev $IFACE metric 0"
+		else
+			log "failed to install IPv$fam default route dev $IFACE"
+		fi
+	done
+}
+
+del_default_routes() {
+	local fam
+	for fam in 4 6; do
+		ip_cmd "$fam" route del default dev "$IFACE" metric 0 2>/dev/null && \
+			log "removed IPv$fam default route dev $IFACE metric 0"
+	done
+}
+
+restore_wan_defaults() {
+	local fam file line has
+	for fam in 4 6; do
+		file="$STATE_DIR/wan-default-v$fam"
+		[ -s "$file" ] || { rm -f "$file"; continue; }
+		# Any default route that does not point at the tunnel?
+		has="$(ip_cmd "$fam" route show default 2>/dev/null | grep -v "dev $IFACE" )"
+		if [ -n "$has" ]; then
+			log "IPv$fam default route present after cleanup, nothing to restore"
+			rm -f "$file"
+			continue
+		fi
+		while IFS= read -r line; do
+			[ -n "$line" ] || continue
+			# shellcheck disable=SC2086
+			if ip_cmd "$fam" route replace $line 2>/dev/null; then
+				log "restored WAN default route: $line"
+			else
+				log "failed to restore WAN default route: $line"
+			fi
+		done < "$file"
+		rm -f "$file"
+	done
+}
+
+# --- events ----------------------------------------------------------------
+
+do_connect() {
+	save_wan_defaults
+
+	# Endpoint bypass route (must be installed before the default route).
+	if [ -n "$ENDPOINT" ]; then
+		endpoint_split "$ENDPOINT"
+		if [ -n "$EP_IP" ]; then
+			local i=0
+			while [ "$i" -lt "$RETRIES" ]; do
+				if route_get "$EP_FAM" "$EP_IP"; then
+					break
+				fi
+				i=$((i + 1))
+				sleep 1
+			done
+			if [ -n "$RG_DEV" ]; then
+				if [ "$RG_DEV" = "$IFACE" ]; then
+					log "endpoint $EP_IP already routed via $IFACE, no bypass needed"
+				else
+					add_endpoint_bypass "$EP_FAM" "$EP_IP" "$RG_DEV" "$RG_VIA"
+				fi
+			else
+				log "could not resolve route to endpoint $EP_IP, not touching default routes"
+				return 0
+			fi
+		fi
+	else
+		log "no USQUE_ENDPOINT in environment"
+	fi
+
+	add_default_routes
+}
+
+do_disconnect() {
+	del_endpoint_bypass
+	del_default_routes
+	restore_wan_defaults
+}
+
+case "$EVENT" in
+	connect)    log "connect event on $IFACE (endpoint=${ENDPOINT:-unknown})"; do_connect ;;
+	disconnect) log "disconnect event on $IFACE"; do_disconnect ;;
+	'')         log "USQUE_EVENT not set, nothing to do" ;;
+	*)          log "unknown event '$EVENT', nothing to do" ;;
+esac
+
+exit 0

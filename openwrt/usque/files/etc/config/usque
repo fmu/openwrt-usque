@@ -1,0 +1,13 @@
+
+config usque 'main'
+	option enabled '0'
+	option config_file '/etc/usque/warp0.json'
+	option interface 'warp0'
+	option mtu '1400'
+	option ipv6 '0'
+	option http2 '0'
+	option endpoint_port '443'
+	option always_reconnect '1'
+	option auto_register '1'
+	option device_name ''
+	option log_level 'info'

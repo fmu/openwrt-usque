@@ -1,0 +1,90 @@
+#!/bin/sh
+# usque firewall zone helper
+#
+# Creates/updates a dedicated fw4 zone for the WARP tunnel interface and
+# removes it again when the package is uninstalled:
+#
+#   firewall.usque       zone: name usque, device <iface>, input REJECT,
+#                              output ACCEPT, forward REJECT, masq, masq6,
+#                              mtu_fix
+#   firewall.usque_lan   forwarding: lan -> usque
+#
+# Usage: firewall setup [iface]   (idempotent; reloads fw4 only on changes)
+#        firewall teardown        (idempotent)
+#
+# The existing WAN zone is never touched.
+
+ZONE=usque
+FWD=usque_lan
+changed=0
+
+log() { logger -t usque "firewall: $*"; }
+
+fw4_reload() {
+	if command -v fw4 >/dev/null 2>&1; then
+		fw4 reload >/dev/null 2>&1 || log "fw4 reload failed"
+	else
+		log "fw4 not found, firewall changes will apply on next reload"
+	fi
+}
+
+zone_get() { uci -q get "firewall.$ZONE.$1" 2>/dev/null; }
+zone_set() { uci set "firewall.$ZONE.$1=$2" && changed=1; }
+
+setup() {
+	local iface="${1:-warp0}"
+
+	if ! uci -q get "firewall.$ZONE" >/dev/null 2>&1; then
+		uci set "firewall.$ZONE=zone"
+		uci set "firewall.$ZONE.name=$ZONE"
+		uci set "firewall.$ZONE.input=REJECT"
+		uci set "firewall.$ZONE.output=ACCEPT"
+		uci set "firewall.$ZONE.forward=REJECT"
+		uci set "firewall.$ZONE.masq=1"
+		uci set "firewall.$ZONE.masq6=1"
+		uci set "firewall.$ZONE.mtu_fix=1"
+		uci set "firewall.$ZONE.device=$iface"
+		changed=1
+	fi
+
+	[ "$(zone_get device)" = "$iface" ] || zone_set device "$iface"
+
+	if ! uci -q get "firewall.$FWD" >/dev/null 2>&1; then
+		uci set "firewall.$FWD=forwarding"
+		uci set "firewall.$FWD.src=lan"
+		uci set "firewall.$FWD.dest=$ZONE"
+		changed=1
+	fi
+
+	if [ "$changed" = 1 ]; then
+		uci commit firewall
+		log "zone '$ZONE' (device $iface) configured"
+		fw4_reload
+	else
+		log "zone '$ZONE' (device $iface) already configured"
+	fi
+}
+
+teardown() {
+	if uci -q get "firewall.$FWD" >/dev/null 2>&1; then
+		uci delete "firewall.$FWD" && changed=1
+	fi
+	if uci -q get "firewall.$ZONE" >/dev/null 2>&1; then
+		uci delete "firewall.$ZONE" && changed=1
+	fi
+	if [ "$changed" = 1 ]; then
+		uci commit firewall
+		log "zone '$ZONE' removed"
+		fw4_reload
+	else
+		log "zone '$ZONE' not present, nothing to remove"
+	fi
+}
+
+case "$1" in
+	setup)    shift; setup "$@" ;;
+	teardown) teardown ;;
+	*)        echo "usage: $0 setup [iface] | teardown" >&2; exit 1 ;;
+esac
+
+exit 0
