@@ -343,6 +343,10 @@ apk add luci-app-usque</code></pre>
           <p>The <code>luci-app-usque</code> package depends on <code>usque</code> and
           <code>kmod-tun</code>, so one command installs the daemon, the init script, the UCI
           configuration and the LuCI view. For a CLI-only setup use <code>apk add usque</code>.</p>
+          <p class="fineprint"><strong>Already installed?</strong> <code>apk add luci-app-usque</code>
+          only installs missing packages. With apk-tools 3 it does <em>not</em> upgrade an existing
+          installation — apk just reports the package as “upgradable from …” and keeps the old
+          version. Use the <a href="#upgrade">upgrade steps</a> below instead.</p>
           <p>Check what you got — the two packages are versioned independently:</p>
           <figure class="cmd">
             <pre><code>apk info -v usque            # usque-0.2.0-r1
@@ -397,12 +401,34 @@ apk update</code></pre>
       </figure>
       <p>Then <a href="#uninstall">uninstall the packages</a> if you no longer need them.</p>
 
-      <div class="callout note">
-        <p><strong>Upgrading from v0.1.x?</strong> The automatic route takeover is gone. After the
-        upgrade, check the <em>Default route</em> switch of each connection — it defaults to off — and
-        turn it on if you want the full-tunnel behaviour you had before. See
-        <a href="#routing">Routing</a>.</p>
-      </div>
+      <h3 id="upgrade">Upgrading an existing install</h3>
+      <p>apk-tools 3 does not upgrade installed packages through <code>apk add</code>: with an older
+      version already installed, <code>apk update &amp;&amp; apk add luci-app-usque</code> leaves it in
+      place and only mentions that it is “upgradable from …”. Upgrade in one of these ways:</p>
+      <figure class="cmd">
+        <pre><code># 1) upgrade just the two usque packages (recommended)
+apk update
+apk upgrade usque luci-app-usque
+
+# 2) or upgrade every installed package
+apk update
+apk upgrade
+
+# 3) or pin exact versions from the feed
+apk policy usque luci-app-usque          # show versions available in the feed
+apk add usque=&lt;version&gt; luci-app-usque=&lt;version&gt;
+# e.g. apk add usque=0.2.1-r1 luci-app-usque=1.1.1-r1</code></pre>
+      </figure>
+      <p class="fineprint"><code>apk upgrade</code> without package names upgrades <strong>all</strong>
+      installed packages — convenient, but it can also update unrelated packages (and pull a new kernel
+      on some systems). Naming the packages (<code>apk upgrade usque luci-app-usque</code>) or pinning
+      versions with <code>apk add &lt;pkg&gt;=&lt;version&gt;</code> keeps the change targeted. Use
+      <code>apk policy</code> to see the versions in the feed and <code>apk info -v</code> to check
+      what is installed.</p>
+      <p class="fineprint"><strong>Coming from v0.1.x?</strong> The automatic route takeover is gone:
+      after upgrading, check the <em>Default route</em> switch of each connection — it defaults to
+      off — and enable it if you want the full-tunnel behaviour you had before. See
+      <a href="#routing">Routing</a>.</p>
     </div>
   </section>
 
@@ -1134,6 +1160,18 @@ ip -6 route show default</code></pre>
         <a href="#install"><code>--allow-untrusted</code> fallback</a> is a last resort only.</p>
       </details>
 
+      <details class="faq" id="ts-upgrade">
+        <summary>I ran apk update &amp;&amp; apk add but the version stayed the same</summary>
+        <p>With apk-tools 3, <code>apk add</code> only installs missing packages; it does not upgrade an
+        installed one (apk prints “upgradable from …” instead). Upgrade with <code>apk upgrade
+        usque luci-app-usque</code>, <code>apk upgrade</code> for everything, or pin versions:
+        <code>apk add usque=&lt;version&gt; luci-app-usque=&lt;version&gt;</code>. Then check:</p>
+        <figure class="cmd">
+          <pre><code>apk info -v usque
+apk info -v luci-app-usque
+apk policy usque luci-app-usque</code></pre>
+        </figure>
+      </details>
       <details class="faq">
         <summary>No internet after stopping or uninstalling the tunnel</summary>
         <p>What usque added is removed on stop. If a crash left something behind, restore normal
