@@ -760,6 +760,7 @@ ip route show | grep warp0</code></pre>
 	option device_name ''
 	option log_level 'info'
 	option sni ''
+	option authority ''
 
 config usque 'backup'
 	option enabled '0'
@@ -806,10 +807,10 @@ config usque 'backup'
 }</code></pre>
       </figure>
       <p class="fineprint">Shape only — get the real values from your provider. Importing writes the
-      file atomically with mode <code>600</code>. If your provider needs TLS SNI, set it as the
-      connection's <code>sni</code> option (LuCI: <em>TLS SNI (custom mode)</em>, passed as
-      <code>-s &lt;sni&gt;</code>); it is not part of the JSON. <code>logread -e usque</code> reports
-      the handshake result.</p>
+      file atomically with mode <code>600</code>. If your provider needs TLS SNI or a specific HTTP
+      authority, set the connection's <code>sni</code> option (<code>-s</code>; LuCI: <em>TLS SNI
+      (custom mode)</em>) or <code>authority</code> option (<code>--authority</code>; UCI only) — they
+      are not part of the JSON. <code>logread -e usque</code> reports the handshake result.</p>
       <p>The endpoint must speak a compatible MASQUE/Connect-IP service. Custom connections are not
       registered or re-registered by the init script, and <code>auto_register</code> does nothing for
       them.</p>
@@ -848,6 +849,7 @@ config usque 'backup'
             <tr><td><code>auto_register</code></td><td><code>1</code></td><td>Cloudflare mode only: register a WARP device if the config file is missing. Registration is non-interactive, so it <strong>accepts Cloudflare's WARP terms</strong> on your behalf — set it to <code>0</code> if you want to be asked.</td></tr>
             <tr><td><code>device_name</code></td><td><em>empty</em></td><td>Name used when registering a new device.</td></tr>
             <tr><td><code>sni</code></td><td><em>empty</em></td><td>TLS SNI for custom endpoints (passed as <code>-s &lt;sni&gt;</code>). Not needed for Cloudflare WARP.</td></tr>
+            <tr><td><code>authority</code></td><td><em>empty</em></td><td>HTTP authority/host to present to a custom endpoint (<code>--authority &lt;host&gt;</code>); useful when the endpoint expects a specific hostname. Not exposed in the LuCI form.</td></tr>
             <tr><td><code>log_level</code></td><td><code>info</code></td><td>Daemon log level: <code>error</code>, <code>warn</code>, <code>info</code>, <code>debug</code>.</td></tr>
           </tbody>
         </table>
@@ -914,7 +916,8 @@ usque --version</code></pre>
       packaged service adds the routing hook and applies the switches described above. Use the service
       for routed setups. The init script maps the UCI options to CLI flags: <code>ipv6='0'</code> →
       <code>--no-tunnel-ipv6</code>, <code>endpoint_ipv6='1'</code> → <code>--ipv6</code>,
-      <code>sni</code> → <code>-s</code>.</p>
+      <code>sni</code> → <code>-s</code>, <code>authority</code> →
+      <code>--authority</code>.</p>
 
       <h3 id="service">Service commands and logs</h3>
       <figure class="cmd">
@@ -1052,7 +1055,8 @@ ip -6 route show default</code></pre>
         connection's <em>Configuration JSON</em> box, or write it yourself). Common causes: wrong or
         expired keys, the endpoint unreachable over UDP/443, or a missing <code>sni</code> when the
         provider requires TLS SNI (<code>uci set usque.&lt;section&gt;.sni='example.com'</code>, passed
-        as <code>-s</code>). Check <code>logread -e usque</code> for handshake errors, verify the
+        as <code>-s</code>) or an HTTP authority (<code>uci set
+        usque.&lt;section&gt;.authority='example.com'</code>, passed as <code>--authority</code>). Check <code>logread -e usque</code> for handshake errors, verify the
         required fields against <a href="#custom">custom mode</a>, and confirm the same credentials
         work with another client. Remember: <code>auto_register</code> has no effect in custom
         mode.</p>
