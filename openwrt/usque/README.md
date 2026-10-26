@@ -77,6 +77,7 @@ Per-connection section options:
 | `log_level` | `info` | `RUST_LOG` filter for the daemon |
 | `sni` | *(empty)* | TLS SNI for custom endpoints (`-s <sni>`) |
 | `authority` | *(empty)* | CONNECT request authority for custom endpoints (`--authority <host>`) |
+| `protocol` | *(empty)* | CONNECT-IP protocol token for custom endpoints (`--protocol <token>`, e.g. `connect-ip` for RFC 9484 servers) |
 
 ## Routing behaviour
 

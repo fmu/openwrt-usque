@@ -59,6 +59,7 @@ section_options() {
 	config_get s_log_level "$sid" log_level info
 	config_get s_sni "$sid" sni ''
 	config_get s_authority "$sid" authority ''
+	config_get s_protocol "$sid" protocol ''
 
 	[ "$s_enabled" = 1 ] || return 1
 
@@ -129,6 +130,7 @@ start_instance() {
 	[ "$s_always_reconnect" = 1 ] && procd_append_param command --always-reconnect
 	[ -n "$s_sni" ] && procd_append_param command -s "$s_sni"
 	[ -n "$s_authority" ] && procd_append_param command --authority "$s_authority"
+	[ -n "$s_protocol" ] && procd_append_param command --protocol "$s_protocol"
 	procd_set_param env \
 		PATH=/usr/sbin:/usr/bin:/sbin:/bin \
 		RUST_LOG="$s_log_level" \
