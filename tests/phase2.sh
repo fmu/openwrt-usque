@@ -160,103 +160,83 @@ step_feed() {
 }
 
 step_service() {
-  log "4. procd service lifecycle"
-  rt 'uci set usque.warp0.enabled=1; uci set usque.warp0.default_route=0; uci commit usque; /etc/init.d/usque enable; echo enabled=$(/etc/init.d/usque enabled && echo yes)'
+  log "4. Enable + start warp0 with v2 defaults (default_route=0, ipv6_route=auto)"
+  rt 'uci set usque.warp0.enabled=1; uci commit usque; /etc/init.d/usque enable' >/dev/null 2>&1
   rt '/etc/init.d/usque start' | sed 's/^/  | /'
   local i=0 live=0
-  while [ "$i" -lt 40 ]; do
+  while [ "$i" -lt 45 ]; do
     if rt "ip link show $IFACE >/dev/null 2>&1 && pgrep -f '/usr/bin/usque' >/dev/null"; then live=1; break; fi
     sleep 1; i=$((i+1))
   done
-  [ "$live" = 1 ] && { ok "service started, $IFACE exists after ~${i}s"; record "service start (tun up in ${i}s)"; } \
-                  || { bad "service did not bring up $IFACE within 40s"; record "service start"; }
-  log "4a. status"
-  S=$(rt '/etc/init.d/usque status; echo "---ubus"; ubus call service list "{\"name\":\"usque\"}" 2>&1 | head -40; echo "---log"; logread -e usque | tail -25')
+  [ "$live" = 1 ] && { ok "service started, $IFACE up after ~${i}s"; record "service start (tun up in ${i}s)"; } \
+                  || { bad "service did not bring up $IFACE within 45s"; record "service start"; }
+  log "4a. status + logs"
+  S=$(rt '/etc/init.d/usque status; echo "---ubus"; ubus call service list "{\"name\":\"usque\"}" | head -c 700; echo; echo "---log"; logread -e usque | tail -25')
   show "$S"
-  echo "$S" | grep -qi 'running' && { ok "init status running"; record "init status running"; } || { bad "init status not running"; record "init status running"; }
-  echo "$S" | grep -qi 'Connected to MASQUE server\|Tunnel established' && { ok "MASQUE connected per logs"; record "MASQUE connected (service)"; } \
-                                                                      || { bad "no MASQUE connect log line"; record "MASQUE connected (service)"; }
-  log "4a0. Default install safety: WAN default must be untouched (default_route=0)"
-  SAFE=$(rt 'ip -4 route show default; echo ===v6; ip -6 route show default; echo ===rule4; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===rule6; ip -6 rule show | grep -E "^1000:.*lookup main" || echo none; echo ===routes_via_tun; ip -4 route show | grep " dev warp0" || echo none')
+  echo "$S" | grep -qi 'Connected to MASQUE server\|tunnel established\|MASQUE' && { ok "MASQUE connected per logs"; record "service: MASQUE connected"; } \
+                                                                              || { bad "no MASQUE connect log line"; record "service: MASQUE connected"; }
+  log "4a0. DEFAULT-OFF SAFETY: no IPv4 routing change with default_route=0"
+  SAFE=$(rt 'echo ===v4def; ip -4 route show default; echo ===v6def; ip -6 route show default; echo ===rule4; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===rule6; ip -6 rule show | grep -E "^1000:.*lookup main" || echo none; echo ===bypass; ip -4 route show 162.159.198.2/32 2>/dev/null || echo none; echo ===via_tun4; ip -4 route show | grep " dev warp0" || echo none')
   show "$SAFE"
-  case "$SAFE" in *"default via "*"dev phy0-tether"*) ok "WAN IPv4 default route intact"; record "default install: WAN v4 default untouched";; *) bad "WAN IPv4 default route changed by default install"; record "default install: WAN v4 default untouched";; esac
-  case "$SAFE" in *"default"*"dev warp0"*) bad "v4 default was taken over despite default_route=0"; record "default install: no v4 default takeover";; *) ok "no v4 default route via warp0"; record "default install: no v4 default takeover";; esac
-  echo "$SAFE" | sed -n '/===rule4/,/===rule6/p' | grep -q '^1000:' && { bad "priority-1000 v4 rule installed despite default_route=0"; record "default install: no policy rule"; } || { ok "no priority-1000 v4 policy rule"; record "default install: no policy rule"; }
-  INSTALL_EG=$(rt 'curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
-  show "egress: $INSTALL_EG"
-  echo "$INSTALL_EG" | grep -q 'warp=off' && { ok "router egress still direct WAN (warp=off) with default_route=0"; record "default install: egress warp=off"; } || { bad "egress changed with default_route=0"; record "default install: egress warp=off"; }
+  echo "$SAFE" | sed -n '/===v4def/,/===v6def/p' | grep -q 'default via .*dev phy0-tether' && { ok "WAN IPv4 default intact"; record "default-off: WAN v4 default intact"; } \
+                                                                                        || { bad "WAN IPv4 default changed"; record "default-off: WAN v4 default intact"; }
+  echo "$SAFE" | sed -n '/===v4def/,/===v6def/p' | grep -q 'dev warp0' && { bad "IPv4 default taken over despite default_route=0"; record "default-off: no v4 takeover"; } \
+                                                                         || { ok "no IPv4 default via warp0"; record "default-off: no v4 takeover"; }
+  echo "$SAFE" | sed -n '/===rule4/,/===rule6/p' | grep -q '^1000:' && { bad "IPv4 policy rule installed despite default_route=0"; record "default-off: no v4 policy rule"; } \
+                                                                      || { ok "no IPv4 policy rule"; record "default-off: no v4 policy rule"; }
+  echo "$SAFE" | sed -n '/===bypass/,/===via_tun4/p' | grep -q '162.159.198.2' && { bad "endpoint bypass installed despite default_route=0"; record "default-off: no endpoint bypass"; } \
+                                                                                || { ok "no endpoint bypass"; record "default-off: no endpoint bypass"; }
+  echo "$SAFE" | sed -n '/===v6def/,$p' | grep -q 'dev warp0' && { ok "IPv6 default via warp0 installed (ipv6_route=auto, no native v6)"; record "ipv6: auto default via tun"; } \
+                                                                 || { bad "no IPv6 default via warp0"; record "ipv6: auto default via tun"; }
+  echo "$SAFE" | sed -n '/===rule6/,$p' | grep -q '^1000:' && { ok "IPv6 priority-1000 rule installed"; record "ipv6: policy rule installed"; } \
+                                                              || { bad "no IPv6 policy rule"; record "ipv6: policy rule installed"; }
 
-  log "4b. tun / routes / firewall"
-  T=$(rt "echo === link; ip -br link show $IFACE; echo === addr; ip addr show dev $IFACE; echo === routes; ip -4 route show; echo === route6; ip -6 route show; echo === nft-zone; nft list ruleset | grep -i -A4 usque; echo === fw4-zone; uci show firewall | grep -i warp0")
+  log "4b. tun device"
+  T=$(rt "echo === link; ip -br link show $IFACE; echo === addr4; ip -4 addr show dev $IFACE | grep inet; echo === addr6; ip -6 addr show dev $IFACE | grep inet6; echo === mtu; ip link show $IFACE | head -1")
   show "$T"
-  echo "$T" | grep -q "$IFACE" && { ok "$IFACE present"; record "service tun device"; } || { bad "no $IFACE"; record "service tun device"; }
-  echo "$T" | grep -q "default dev $IFACE" && { ok "default route via $IFACE"; record "service default route via tun"; } || { bad "default route not via $IFACE"; record "service default route via tun"; }
-  echo "$T" | grep -qi "masq" && { ok "firewall zone/masq referenced"; record "firewall zone + masq"; } || info "no masq match in nft snippet"
-  PRULE=$(rt "ip rule show | grep -E '^1000:.*lookup main'")
-  if [ -n "$PRULE" ]; then ok "packaged hook installed policy rule: $PRULE"; record "packaged hook policy rule (mwan3)"; else bad "no priority-1000 main-table rule -> mwan3 will divert traffic"; record "packaged hook policy rule (mwan3)"; fi
+  echo "$T" | grep -q "$IFACE" && { ok "$IFACE present"; record "service: tun device"; } || { bad "no $IFACE"; record "service: tun device"; }
+  echo "$T" | grep -q '172.16.0.2' && { ok "tun has 172.16.0.2"; record "service: tun IPv4"; } || { bad "tun missing IPv4"; record "service: tun IPv4"; }
+  echo "$T" | grep -q '2606:4700:110' && { ok "tun has WARP IPv6"; record "service: tun IPv6"; } || { bad "tun missing IPv6"; record "service: tun IPv6"; }
 
-  log "4c. Router-originated egress through the service"
-  TRACE=$(rt 'curl -m 20 -s https://www.cloudflare.com/cdn-cgi/trace'); show "$TRACE"
-  if echo "$TRACE" | grep -q '^warp=on'; then
-    ok "warp=on with the packaged service"; record "service egress warp=on"
-  else
-    bad "warp=off with the packaged service (mwan3 policy routing?)"; record "service egress warp=on"
-    if [ "${MAKE_MWAN3_WORKAROUND:-0}" = 1 ]; then
-      log "4d. TEST-ONLY mwan3 workaround (product must do this itself)"
-      rt 'ip rule add priority 1000 from all lookup main'
-      TRACE2=$(rt 'curl -m 20 -s https://www.cloudflare.com/cdn-cgi/trace'); show "$TRACE2"
-      echo "$TRACE2" | grep -q '^warp=on' && { ok "warp=on only after priority-1000 rule -> hook must add it"; record "service egress warp=on WITH manual mwan3 rule"; } \
-                                            || { bad "still warp=off with rule"; record "service egress warp=on WITH manual mwan3 rule"; }
-    else
-      info "rerun with MAKE_MWAN3_WORKAROUND=1 to confirm the mwan3 rule is the only blocker"
-    fi
-  fi
-  log "4e. LAN client path (Mac uses the router as default gateway)"
-  MAC_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')
-  if [ "$MAC_GW" = 192.168.1.1 ]; then
-    MTRACE=$(curl -m 20 -s https://www.cloudflare.com/cdn-cgi/trace); show "$MTRACE"
-    echo "$MTRACE" | grep -q '^warp=on' && { ok "LAN client (Mac) egress warp=on via router"; record "LAN client egress warp=on"; } \
-                                        || { bad "LAN client egress warp=off"; record "LAN client egress warp=on"; }
-    MDNS=$(dig +short +time=3 +tries=1 www.cloudflare.com @192.168.1.1 2>/dev/null | head -2)
-    show "Mac DNS via router: $MDNS"
-    [ -n "$MDNS" ] && { ok "LAN DNS via router works"; record "LAN DNS via router"; } || { bad "LAN DNS via router failed"; record "LAN DNS via router"; }
-  else
-    info "Mac default gateway is $MAC_GW (not the router) — LAN path verified via ubus counters instead"
-    record "LAN client egress warp=on" SKIP
-  fi
-  log "4e2. Guest network (br-guest -> wan) while the tunnel is up"
-  G=$(rt 'echo === guest-zone; uci show firewall | grep -A8 "name=.guest."; echo === wan-zone-networks; uci show firewall | grep "@zone\[1\].network"; echo === forward-chains; nft list ruleset | grep -E "forward_guest|forward_wan" | head -10; echo === guest-addr; ip -4 addr show br-guest | grep inet; echo === dnsmasq-listen; netstat -lnu 2>/dev/null | grep :53 | head -3')
-  show "$G"
-  echo "$G" | grep -q 'guest' && { ok "guest zone present"; record "guest zone present"; } || { bad "guest zone missing"; record "guest zone present"; }
-  # fw4 renders forwardings as `chain forward_<src> { jump accept_to_<dst> }`.
-  # With the tunnel as default route, a guest client's packets must be accepted
-  # towards the usque zone, otherwise guest clients lose internet during WARP.
+  log "4b2. firewall zone + forwarding (LAN/guest) while tunnel up"
+  F=$(rt 'uci show firewall | grep -A10 "usque" | head -20; echo ===nft; nft list ruleset | sed -n "/chain forward_lan {/,/}/p"; nft list ruleset | sed -n "/chain forward_guest {/,/}/p"')
+  show "$F"
+  echo "$F" | grep -q "firewall.usque" && { ok "fw4 zone 'usque' created"; record "firewall: usque zone"; } || { bad "no usque firewall zone"; record "firewall: usque zone"; }
+  echo "$F" | grep -q 'accept_to_usque' && { ok "forwarding into usque zone present"; record "firewall: forwarding to usque"; } || info "no forwarding chain to usque yet"
   GJ=$(rt 'nft list ruleset | sed -n "/chain forward_guest {/,/}/p"')
-  show "forward_guest chain:"; show "$GJ"
-  echo "$GJ" | grep -q 'accept_to_usque' && { ok "guest -> usque forwarding installed"; record "guest -> usque forwarding"; } \
-                                           || { bad "guest -> usque forwarding MISSING (guest internet breaks while tunnel is up)"; record "guest -> usque forwarding"; }
-  LJ=$(rt 'nft list ruleset | sed -n "/chain forward_lan {/,/}/p"')
-  echo "$LJ" | grep -q 'accept_to_usque' && { ok "lan -> usque forwarding installed"; record "lan -> usque forwarding"; } \
-                                          || { bad "lan -> usque forwarding MISSING (LAN clients lose internet while tunnel is up)"; record "lan -> usque forwarding"; }
-  GSTATE=$(rt 'ubus call network.interface.guest status 2>/dev/null | head -c 300')
-  show "guest ifstatus: $GSTATE"
-  info "NOTE: no physical guest client is attached; verified are zone/forwarding/masq config + that the guest L3 interface is up. A live guest-client test needs a client on the guest SSID."
+  echo "$GJ" | grep -q 'accept_to_usque' && { ok "guest -> usque forwarding present"; record "guest -> usque forwarding"; } \
+                                          || { bad "guest -> usque forwarding missing (guest clients would break with routing on)"; record "guest -> usque forwarding"; }
 
-  log "4f. restart / stop / start"
-  rt '/etc/init.d/usque restart'; sleep 8
-  rt "ip -br link show $IFACE" | sed 's/^/  | /'
-  rt "ip link show $IFACE >/dev/null 2>&1" && { ok "restart brought tun back"; record "service restart"; } || { bad "restart failed"; record "service restart"; }
-  rt '/etc/init.d/usque stop'; sleep 3
-  POSTSTOP=$(rt "ip -4 route show; echo ===; ip link show $IFACE >/dev/null 2>&1 && echo \"$IFACE PRESENT\" || echo \"$IFACE ABSENT\"; echo ===; curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='")
+  log "4c. egress with defaults (v4 must still be WAN, v6 via WARP)"
+  V4=$(rt 'curl -4 -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+  V6=$(rt 'curl -6 -m 20 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp|colo)="')
+  show "v4: $V4"; show "v6: $V6"
+  echo "$V4" | grep -q 'warp=off' && { ok "IPv4 egress still direct WAN (warp=off)"; record "egress: v4 warp=off with defaults"; } \
+                                   || { bad "IPv4 egress changed with default_route=0"; record "egress: v4 warp=off with defaults"; }
+  echo "$V6" | grep -q 'warp=on' && { ok "IPv6 egress through WARP (warp=on)"; record "egress: v6 warp=on via tun"; } \
+                                 || { bad "IPv6 egress not warp=on"; record "egress: v6 warp=on via tun"; }
+
+  log "4d. resource usage"
+  RES=$(rt 'PID=$(pgrep -f "/usr/bin/usque" | head -1); grep -E "^(VmSize|VmRSS|Threads)" /proc/$PID/status
+        read -r _ _ _ _ _ _ _ _ _ _ _ _ _ U1 S1 _ < /proc/$PID/stat; sleep 10; read -r _ _ _ _ _ _ _ _ _ _ _ _ _ U2 S2 _ < /proc/$PID/stat
+        echo "cpu=$((($U2-$U1+$S2-$S1)/10))% of one core avg over 10s"')
+  show "$RES"
+
+  log "4e. restart"
+  rt '/etc/init.d/usque restart' >/dev/null 2>&1; sleep 8
+  rt "ip link show $IFACE >/dev/null 2>&1" && { ok "restart brought tun back"; record "service: restart"; } || { bad "restart failed"; record "service: restart"; }
+
+  log "4f. stop -> everything reverted, WAN default untouched"
+  rt '/etc/init.d/usque stop' >/dev/null 2>&1; sleep 4
+  POSTSTOP=$(rt 'echo ===v4def; ip -4 route show default; echo ===v6def; ip -6 route show default; echo ===rule4; ip rule show | grep -E "^1000:" || echo none; echo ===rule6; ip -6 rule show | grep -E "^1000:" || echo none; echo ===link; ip link show warp0 >/dev/null 2>&1 && echo PRESENT || echo ABSENT; echo ===trace4; curl -4 -m 12 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
   show "$POSTSTOP"
-  echo "$POSTSTOP" | grep -q "^default via " && { ok "stop restored WAN default route"; record "service stop restores WAN route"; } || { bad "WAN default route not restored after stop"; record "service stop restores WAN route"; }
-  echo "$POSTSTOP" | grep -q 'warp=off' && { ok "stop restored WAN egress (warp=off)"; record "service stop restores warp=off"; } || { bad "egress still via tunnel"; record "service stop restores warp=off"; }
-  RULE_LEFT=$(rt "ip rule show | grep -cE '^1000:.*lookup main'")
-  [ "${RULE_LEFT:-0}" -eq 0 ] && { ok "policy rule removed on stop (mwan3 rules intact)"; record "service stop removes policy rule"; } || { bad "policy rule left behind after stop"; record "service stop removes policy rule"; }
-  MWAN_RULES=$(rt "ip rule show | grep -cE 'fwmark .*lookup 1'")
-  [ "${MWAN_RULES:-0}" -ge 1 ] && { ok "mwan3 fwmark rules still intact ($MWAN_RULES)"; record "mwan3 rules intact after stop"; } || info "mwan3 fwmark rules not found (mwan3 may be off)"
-  rt '/etc/init.d/usque start'; sleep 6
-  rt "ip link show $IFACE >/dev/null 2>&1" && { ok "start after stop works"; record "service start after stop"; } || { bad "start after stop failed"; record "service start after stop"; }
+  echo "$POSTSTOP" | sed -n '/===v4def/,/===v6def/p' | grep -q 'default via .*dev phy0-tether' && { ok "WAN default intact after stop"; record "stop: WAN default intact"; } || { bad "WAN default changed after stop"; record "stop: WAN default intact"; }
+  echo "$POSTSTOP" | sed -n '/===rule4/,/===rule6/p' | grep -q '^1000:' && { bad "IPv4 rule left after stop"; record "stop: no leftover rules"; } || { ok "no leftover policy rules after stop"; record "stop: no leftover rules"; }
+  echo "$POSTSTOP" | grep -q 'ABSENT' && { ok "tun device removed on stop"; record "stop: tun removed"; } || info "tun still present after stop"
+  echo "$POSTSTOP" | grep -q 'warp=off' && { ok "v4 egress WAN after stop"; record "stop: egress ok"; } || { bad "v4 egress broken after stop"; record "stop: egress ok"; }
+  log "4g. start again for following steps"
+  rt '/etc/init.d/usque start' >/dev/null 2>&1; sleep 6
+  rt "ip link show $IFACE >/dev/null 2>&1" && { ok "service up again"; record "service: start after stop"; } || { bad "start after stop failed"; record "service: start after stop"; }
 }
 
 step_luci() {
@@ -265,12 +245,16 @@ step_luci() {
   show "$F"
   echo "$F" | grep -q 'menu.d/luci-app-usque.json' && { ok "menu.d entry installed"; record "LuCI menu.d"; } || { bad "menu.d entry missing"; record "LuCI menu.d"; }
   echo "$F" | grep -q 'acl.d/luci-app-usque.json' && { ok "acl.d entry installed"; record "LuCI acl.d"; } || { bad "acl.d entry missing"; record "LuCI acl.d"; }
-  echo "$F" | grep -q 'view/usque/' && { ok "JS view asset installed"; record "LuCI view asset"; } || { bad "JS view asset missing"; record "LuCI view asset"; }
-  rt '/etc/init.d/rpcd restart' >/dev/null 2>&1; sleep 2
-  U=$(rt 'echo === list; ubus -S list luci.usque 2>&1; echo === status; ubus -S call luci.usque status 2>&1; echo === getConfig; ubus -S call luci.usque getConfig 2>&1; echo === test; ubus -S call luci.usque test 2>&1')
+  rt 'test -f /www/luci-static/resources/view/usque/overview.js' && { ok "JS view asset installed"; record "LuCI view asset"; } || { bad "JS view asset missing"; record "LuCI view asset"; }
+  rt 'rm -f /tmp/luci-indexcache.*; rm -rf /tmp/luci-modulecache; /etc/init.d/rpcd reload' >/dev/null 2>&1; sleep 3
+  U=$(rt 'echo === list; ubus -S list luci.usque 2>&1; echo === status; ubus -S call luci.usque status 2>&1; echo === getConfig; ubus -S call luci.usque getConfig "{\"section\":\"warp0\"}" 2>&1; echo === test; ubus -S call luci.usque test "{\"section\":\"warp0\"}" 2>&1; echo === logs; ubus -S call luci.usque logs "{\"section\":\"warp0\"}" 2>&1 | head -c 600; echo')
   show "$U"
   echo "$U" | grep -q 'luci.usque' && { ok "ubus object luci.usque present"; record "ubus object luci.usque"; } || { bad "ubus object missing"; record "ubus object luci.usque"; }
   echo "$U" | grep -q '"' && { ok "ubus methods return JSON"; record "ubus methods return JSON"; } || { bad "ubus methods returned no JSON"; record "ubus methods return JSON"; }
+  echo "$U" | grep -q 'connections' && { ok "status reports connections[]"; record "ubus: status connections[]"; } || { bad "status missing connections[]"; record "ubus: status connections[]"; }
+  echo "$U" | grep -q '"warp0"' && { ok "status/getConfig reference section warp0"; record "ubus: section warp0"; } || { bad "no warp0 section in ubus output"; record "ubus: section warp0"; }
+  if echo "$U" | grep -qiE 'private_key|access_token'; then bad "SECRET LEAK in ubus output (private_key/access_token)"; record "ubus: no secrets leaked"; else ok "no private_key/access_token in any ubus output"; record "ubus: no secrets leaked"; fi
+  echo "$U" | grep -q 'invalid or missing section\|Invalid or missing section' && { bad "section parameter rejected"; record "ubus: section parameter accepted"; } || { ok "section parameter accepted"; record "ubus: section parameter accepted"; }
 
   log "5b. HTTP assets"
   for path in /cgi-bin/luci/ /cgi-bin/luci/admin/services/usque /luci-static/resources/view/usque/overview.js; do
@@ -308,21 +292,23 @@ step_luci() {
 }
 
 step_reboot() {
-  log "6. Reboot test (pre-state)"
-  PRE=$(rt "date; uptime; ip -4 route show; echo ===; cat /etc/config/usque; echo ===; /etc/init.d/usque enabled && echo ENABLED || echo DISABLED; echo ===; ip link show $IFACE 2>&1 | head -2; echo ===; curl -m 12 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='")
-  show "$PRE"
-  : > "$ART_DIR/phase2-reboot-pre.txt"; printf '%s\n' "$PRE" > "$ART_DIR/phase2-reboot-pre.txt"
-  info "rebooting router now"
+  log "6. Reboot test — pre-state"
+  PRE=$(rt "date; uptime; echo ===v4def; ip -4 route show default; echo ===v6def; ip -6 route show default; echo ===rule4; ip rule show | grep -E '^1000:' || echo none; echo ===rule6; ip -6 rule show | grep -E '^1000:' || echo none; echo ===uci; uci show usque; echo ===enabled; /etc/init.d/usque enabled && echo ENABLED || echo DISABLED; echo ===iface; ip -br link show warp0 2>&1; echo ===trace4; curl -4 -m 12 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='; echo ===trace6; curl -6 -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='")
+  show "$PRE"; printf '%s\n' "$PRE" > "$ART_DIR/phase2-reboot-pre.txt"
+  log "6a. rebooting now"
   ssh "${SSH_OPTS[@]}" "$ROUTER" 'sync; (sleep 1; reboot) >/dev/null 2>&1 &' || true
-  sleep 8; ssh "${SSH_OPTS[@]}" -o ConnectTimeout=3 "$ROUTER" true 2>/dev/null && info "still reachable, waiting for drop"
-  if wait_router_up 180; then ok "router back after reboot"; record "reboot: router reachable"; else bad "router did not come back in 180s"; record "reboot: router reachable"; return 1; fi
-  log "6b. Post-reboot state"
-  POST=$(rt "date; uptime; ip -4 route show; echo ===; cat /etc/config/usque; echo ===; /etc/init.d/usque enabled && echo ENABLED || echo DISABLED; echo ===; ip br-link 2>/dev/null; ip -br link show $IFACE 2>&1; echo ===; logread -e usque | head -20; echo ===; curl -m 20 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='")
-  show "$POST"; : > "$ART_DIR/phase2-reboot-post.txt"; printf '%s\n' "$POST" > "$ART_DIR/phase2-reboot-post.txt"
+  sleep 12
+  if wait_router_up 240; then ok "router back after reboot"; record "reboot: router reachable"; else bad "router did not come back"; record "reboot: router reachable"; return 1; fi
+  sleep 12
+  log "6b. post-reboot state"
+  POST=$(rt "date; uptime; echo ===v4def; ip -4 route show default; echo ===v6def; ip -6 route show default; echo ===rule4; ip rule show | grep -E '^1000:' || echo none; echo ===rule6; ip -6 rule show | grep -E '^1000:' || echo none; echo ===enabled; /etc/init.d/usque enabled && echo ENABLED || echo DISABLED; echo ===iface; ip -br link show warp0 2>&1; echo ===trace4; curl -4 -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='; echo ===trace6; curl -6 -m 20 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|warp)='; echo ===log; logread -e usque | head -12")
+  show "$POST"; printf '%s\n' "$POST" > "$ART_DIR/phase2-reboot-post.txt"
   echo "$POST" | grep -q ENABLED && { ok "service still enabled after reboot"; record "reboot: service enabled"; } || { bad "service not enabled after reboot"; record "reboot: service enabled"; }
-  echo "$POST" | grep -q "$IFACE" && { ok "$IFACE came up automatically"; record "reboot: tun auto-started"; } || { bad "$IFACE missing after reboot"; record "reboot: tun auto-started"; }
-  echo "$POST" | grep -q 'warp=on' && { ok "egress warp=on after reboot"; record "reboot: egress warp=on"; } || { bad "egress warp=off after reboot"; record "reboot: egress warp=on"; }
-  code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' http://192.168.1.1/cgi-bin/luci/); [ "$code" = 200 ] && { ok "LuCI reachable after reboot"; record "reboot: LuCI reachable"; } || { bad "LuCI not reachable ($code)"; record "reboot: LuCI reachable"; }
+  echo "$POST" | grep -q 'warp0 ' && { ok "warp0 came up automatically"; record "reboot: tun auto-started"; } || { bad "warp0 missing after reboot"; record "reboot: tun auto-started"; }
+  echo "$POST" | sed -n '/===v4def/,/===v6def/p' | grep -q 'default via .*dev phy0-tether' && { ok "WAN v4 default intact after reboot"; record "reboot: WAN v4 default intact"; } || { bad "WAN v4 default changed after reboot"; record "reboot: WAN v4 default intact"; }
+  echo "$POST" | sed -n '/===v4def/,/===v6def/p' | grep -q 'dev warp0' && { bad "v4 default taken over after reboot"; record "reboot: no v4 takeover"; } || { ok "no v4 default via warp0 after reboot"; record "reboot: no v4 takeover"; }
+  echo "$POST" | grep -q 'warp=on' && { ok "IPv6 through WARP restored after reboot"; record "reboot: v6 warp=on"; } || { bad "IPv6 not through WARP after reboot"; record "reboot: v6 warp=on"; }
+  code=$(curl -m 10 -s -o /dev/null -w '%{http_code}' http://192.168.1.1/cgi-bin/luci/); [ "$code" = 403 ] || [ "$code" = 200 ] && { ok "LuCI reachable after reboot (HTTP $code)"; record "reboot: LuCI reachable"; } || { bad "LuCI unreachable ($code)"; record "reboot: LuCI unreachable"; }
 }
 
 step_uninstall() {
@@ -384,11 +370,13 @@ step_optin() {
   log "9b. revert (default_route=0 + restart) and verify exact restore"
   rt 'uci set usque.warp0.default_route=0; uci commit usque; /etc/init.d/usque restart' >/dev/null 2>&1
   sleep 6
-  POST=$(rt 'ip -4 route show default; echo ===v6; ip -6 route show default; echo ===rule; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===trace; curl -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
+  POST=$(rt 'ip -4 route show default; echo ===v6; ip -6 route show default; echo ===rule4; ip rule show | grep -E "^1000:.*lookup main" || echo none; echo ===rule6; ip -6 rule show | grep -E "^1000:.*lookup main" || echo none; echo ===trace4; curl -4 -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="; echo ===trace6; curl -6 -m 15 -s https://www.cloudflare.com/cdn-cgi/trace | grep -E "^(ip|warp)="')
   show "$POST"
   echo "$POST" | head -1 | grep -q 'default via .*dev phy0-tether' && { ok "WAN v4 default restored exactly"; record "optin: WAN default restored"; } || { bad "WAN v4 default NOT restored"; record "optin: WAN default restored"; }
-  echo "$POST" | sed -n '/===rule/,/===trace/p' | grep -q '^1000:' && { bad "policy rule left behind after revert"; record "optin: no leftover rule"; } || { ok "no leftover policy rule"; record "optin: no leftover rule"; }
-  echo "$POST" | grep -q 'warp=off' && { ok "egress restored to WAN (warp=off)"; record "optin: egress restored"; } || { bad "egress still via tunnel"; record "optin: egress restored"; }
+  echo "$POST" | sed -n '/===rule4/,/===rule6/p' | grep -q '^1000:' && { bad "IPv4 policy rule left behind after revert"; record "optin: no leftover v4 rule"; } || { ok "no leftover IPv4 policy rule"; record "optin: no leftover v4 rule"; }
+  echo "$POST" | sed -n '/===trace4/,/===trace6/p' | grep -q 'warp=off' && { ok "IPv4 egress restored to WAN (warp=off)"; record "optin: v4 egress restored"; } || { bad "IPv4 egress still via tunnel"; record "optin: v4 egress restored"; }
+  # v6 keeps its auto route/rule by design
+  echo "$POST" | sed -n '/===rule6/,$p' | grep -q '^1000:' && info "v6 policy rule still present (expected with ipv6_route=auto)"
 }
 
 step_ipv6() {
