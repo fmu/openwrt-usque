@@ -2,9 +2,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use std::io;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tun::{AbstractDevice, AsyncDevice, Configuration, DeviceReader, DeviceWriter};
+use tun::{AbstractDevice, Configuration, DeviceReader, DeviceWriter};
 
 use crate::{NativeTun, NativeTunConfig};
 use usque_tunnel_core::TunnelDevice;

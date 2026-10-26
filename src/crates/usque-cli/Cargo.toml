@@ -4,6 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# HTTP/3 (QUIC) is the only MASQUE transport and is always compiled in. The
+# feature is kept as a no-op so callers that pass `FEATURES=quinn` to
+# build/build-usque.sh (the packaging workflow) keep working.
+quinn = ["usque-masque/quinn"]
+
 [lib]
 name = "usque_cli"
 path = "src/lib.rs"

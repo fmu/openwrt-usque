@@ -90,15 +90,17 @@ UNSTRIPPED_SIZE=$(wc -c < "$OUT_BIN" | tr -d ' ')
 # how cargo passes the flag through. macOS' `strip` cannot handle ELF, hence
 # the explicit candidate list (and the ignored failure).
 STRIP_TOOL=""
-for candidate in arm-linux-musleabihf-strip armv7-linux-musleabihf-strip llvm-strip "${CROSS_COMPILE:-}strip"; do
-    if [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1; then
+if [ -n "${CROSS_COMPILE:-}" ]; then
+    STRIP_CANDIDATES="${CROSS_COMPILE}strip arm-linux-musleabihf-strip armv7-linux-musleabihf-strip llvm-strip"
+else
+    STRIP_CANDIDATES="arm-linux-musleabihf-strip armv7-linux-musleabihf-strip llvm-strip"
+fi
+for candidate in $STRIP_CANDIDATES; do
+    if command -v "$candidate" >/dev/null 2>&1; then
         STRIP_TOOL="$candidate"
         break
     fi
 done
-if [ -z "$STRIP_TOOL" ] && [ "$(uname -s)" = "Linux" ] && command -v strip >/dev/null 2>&1; then
-    STRIP_TOOL="strip"
-fi
 if [ -n "$STRIP_TOOL" ]; then
     echo "strip:    $STRIP_TOOL --strip-all"
     "$STRIP_TOOL" --strip-all "$OUT_BIN" || echo "warning: $STRIP_TOOL failed; keeping cargo-stripped binary" >&2
