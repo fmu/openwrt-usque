@@ -258,7 +258,7 @@ return view.extend({
 		if (!service.init_script)
 			warnings.push(E('div', { 'class': 'alert-message danger' }, _('The /etc/init.d/usque init script is missing; reinstall the usque package.')));
 		if (!listCount(conns))
-			warnings.push(E('div', { 'class': 'alert-message notice' }, _('No connections are configured yet. Add one below; the default connection is usually named "main" with interface warp0.')));
+			warnings.push(E('div', { 'class': 'alert-message notice' }, _('No connections are configured yet. Add one below; the shipped default section is "warp0" with interface warp0 (UCI: config usque \'warp0\').')));
 		missingCfg.forEach(function(sid) {
 			warnings.push(E('div', { 'class': 'alert-message warning' }, _('Connection "%s" is enabled but has no configuration file yet. Register a WARP device or import a configuration in the "Account / configuration" section below.').format(sid)));
 		});
