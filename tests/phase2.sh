@@ -193,7 +193,16 @@ step_service() {
   G=$(rt 'echo === guest-zone; uci show firewall | grep -A8 "name=.guest."; echo === wan-zone-networks; uci show firewall | grep "@zone\[1\].network"; echo === forward-chains; nft list ruleset | grep -E "forward_guest|forward_wan" | head -10; echo === guest-addr; ip -4 addr show br-guest | grep inet; echo === dnsmasq-listen; netstat -lnu 2>/dev/null | grep :53 | head -3')
   show "$G"
   echo "$G" | grep -q 'guest' && { ok "guest zone present"; record "guest zone present"; } || { bad "guest zone missing"; record "guest zone present"; }
-  echo "$G" | grep -q "guest" && info "guest forwarding depends on zone wan membership of the tunnel (see wan-zone-networks above)"
+  # fw4 renders forwardings as `chain forward_<src> { jump accept_to_<dst> }`.
+  # With the tunnel as default route, a guest client's packets must be accepted
+  # towards the usque zone, otherwise guest clients lose internet during WARP.
+  GJ=$(rt 'nft list ruleset | sed -n "/chain forward_guest {/,/}/p"')
+  show "forward_guest chain:"; show "$GJ"
+  echo "$GJ" | grep -q 'accept_to_usque' && { ok "guest -> usque forwarding installed"; record "guest -> usque forwarding"; } \
+                                           || { bad "guest -> usque forwarding MISSING (guest internet breaks while tunnel is up)"; record "guest -> usque forwarding"; }
+  LJ=$(rt 'nft list ruleset | sed -n "/chain forward_lan {/,/}/p"')
+  echo "$LJ" | grep -q 'accept_to_usque' && { ok "lan -> usque forwarding installed"; record "lan -> usque forwarding"; } \
+                                          || { bad "lan -> usque forwarding MISSING (LAN clients lose internet while tunnel is up)"; record "lan -> usque forwarding"; }
   GSTATE=$(rt 'ubus call network.interface.guest status 2>/dev/null | head -c 300')
   show "guest ifstatus: $GSTATE"
   info "NOTE: no physical guest client is attached; verified are zone/forwarding/masq config + that the guest L3 interface is up. A live guest-client test needs a client on the guest SSID."

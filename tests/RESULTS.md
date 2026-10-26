@@ -97,30 +97,71 @@ A corrected 150-byte document was proven to parse in ring, build an rcgen `KeyPa
 325-byte self-signed certificate embedding the config public key. Reported to builder with the
 exact constants.
 
-## Phase 1 — raw binary, existing config, spare interface `warp9`
+## Phase 1 — raw binary, existing config, spare interface `warp9` — **PASS**
 
-Status: **harness ready and environment-validated; waiting for a fixed Rust build**. Same
-`tests/phase1.sh` runs both carriers (UDP first, `--http2` on failure) and records every check
-in `tests/artifacts/phase1-summary.txt`.
+Run: `tests/phase1.sh` with `USQUE_BIN=dist/usque` (fixed binary, locally cross-compiled
+from builder's tree with `build/build-usque.sh` + zig 0.17.0/cargo-zigbuild; the CI artifact
+`usque-armv7-musl` can be dropped in `tests/artifacts/build/` and the same command is used).
+
+Artifact: **2,912,344 bytes (2.8 MiB)**, sha256 `a3c91f661f93e0fd2fd24cb4cab287834911a5562c51af507323d04c48eecd8c`.
+Log: [`tests/artifacts/phase1-rust-local.log`](artifacts/phase1-rust-local.log) (gitignored),
+summary [`tests/artifacts/phase1-summary.txt`](artifacts/phase1-summary.txt),
+CLI [`tests/artifacts/usque-help.txt`](artifacts/usque-help.txt) (captured for the docs).
 
 | Check | Result | Evidence |
 | --- | --- | --- |
-| Binary sha256 identical Mac↔router | – | – |
-| `usque --help` runs on armv7 | – | – |
-| MASQUE connected over UDP/443 | – | – |
-| MASQUE connected over HTTP/2 (`--http2`) | – | – |
-| tun `warp9` UP, MTU 1400, 172.16.0.2/32 + IPv6 addr | – | – |
-| Default route via `warp9`, endpoint bypass via WAN | – | – |
-| `warp=on` for router-originated HTTPS | – | – |
-| Egress IP changed vs baseline | – | – |
-| DNS via router resolver / via 1.1.1.1 through tunnel | – | – |
-| IPv6 through tunnel | – | – |
-| RSS / CPU while idle | – | – |
-| Stop → routes withdrawn, `warp=off`, WAN restored | – | – |
+| Binary sha256 identical Mac↔router | PASS | `a3c91f66…` on both |
+| `usque --help`, `native-tun --help` run on armv7 | PASS | full help captured; `--auto-register` present |
+| MASQUE connected over UDP/443 through iPhone tether | PASS | `Connected to MASQUE server`, 1 s, no TLS/ring errors |
+| first-attempt `warp=on` (no retry flapping) | PASS | attempt 1: `dev warp9`, `warp=on` |
+| tun `warp9` UP, MTU 1400, 172.16.0.2/32 + IPv6 /128 | PASS | `phase1-udp-tunnel-state.txt` |
+| Default route via `warp9`; endpoint /32 bypass via `phy0-tether` | PASS | route dump |
+| HTTPS through tunnel | PASS | HTTP 200 |
+| DNS via router resolver and via 1.1.1.1 through tunnel | PASS | `phase1-udp-dns-*.txt` |
+| Egress IP changed `<WAN_IP> → <WARP_EGRESS_IP>`, `colo=VIE`, `loc=AT` | PASS | `phase1-udp-trace.txt` |
+| IPv6 through tunnel | SKIP | `curl -6` no reply; no v6 uplink on this WAN, need builder guidance |
+| RSS / VSZ / threads / idle CPU | PASS | 6,740 kB / 16.3 MB / 5 / ~1 % of one core |
+| Stop → routes withdrawn, `warp=off`, `warp9` gone, no ip rules left | PASS | `phase1-udp-post-stop.txt` |
+
+Two implementation notes from this run:
+- The machine-readable CLI is: `native-tun` with `-c/--config`, `-n/--interface-name`,
+  `-m/--mtu` (default 1400), `-P/--connect-port`, `-k/--keepalive-period`,
+  `-r/--reconnect-delay`, `--always-reconnect`, `--insecure`, `--on-connect`,
+  `--on-disconnect`, `-I/--no-iproute2`, `--persist`, `--auto-register`. In this build
+  `--http2` still existed; it is being removed (QUIC-only) and the harness then skips that
+  carrier automatically.
+- The phase-1 hook (`tests/router/p1-up.sh`) installs the mwan3 workaround rule; the packaged
+  hook must do the same for phase 2 to show `warp=on` (see Finding 2 above).
 
 ## Phase 2 — signed apk feed, procd service, LuCI, reboot, uninstall
 
-Status: **pending packager feed artifacts**.
+Status: **backups + stale-leftover cleanup done (steps 1–2); feed steps pending a
+successful `package.yml` run and a working binary** (package builds currently fail; see
+`gh run list --workflow package.yml`).
+
+### Step 1–2 evidence (already executed on the live router)
+
+Backup (`tests/backup.sh pre-phase2`, local + router copies):
+`tests/backups/pre-phase2-20261026-172340/` (full `/etc/config`, `/etc/apk/{keys,repositories.d}`,
+`/etc/usque/`, `uci show network|firewall`, routes, df, apk world) and
+`/tmp/usque-test/backup-20261026-172340` on the router. Key hashes: `config/network`
+`2f12711b…`, `config/firewall` `ad0d12c3…`, `usque/warp0.json` `5f839021…`.
+
+Stale hand-copied leftovers removed (approved by user/Lead), exact commands:
+
+```sh
+uci -q delete network.warp0; uci -q delete network.warp0_v6; uci commit network
+uci -q del_list firewall.@zone[1].network=warp0
+uci -q del_list firewall.@zone[1].network=warp0_v6
+uci commit firewall
+rm -f /etc/usque/up.sh /etc/usque/down.sh
+fw4 check && fw4 reload
+```
+
+Verified after: `uci show network | grep -c warp0` → 0, `uci show firewall | grep -c warp0` → 0,
+`/etc/usque/` contains only `warp0.json` (kept, so no new Cloudflare device is registered),
+default route `via 172.20.10.1 dev phy0-tether`, egress `warp=off ip=<WAN_IP>`,
+overlay free unchanged at 3396K.
 
 | Check | Result | Evidence |
 | --- | --- | --- |
@@ -137,8 +178,14 @@ Status: **pending packager feed artifacts**.
 | Disable/stop restores WAN default routing | – | – |
 | Uninstall + restore → router as found | – | – |
 
-## Router left in state
+## Router left in state (as of 2026-10-26 17:24 CET, after phase-2 step 2)
 
-At the end of every phase: default route back via `phy0-tether` gw 172.20.10.1,
-`warp=off`, no `warp9`/test routes, no test files outside `/tmp/usque-test`.
-Final state recorded in the last section once both phases complete.
+- Default route `via 172.20.10.1 dev phy0-tether metric 1`, egress `warp=off`,
+  `ip=<WAN_IP>`, DNS/dnsmasq working.
+- **Removed** the approved stale hand-copied leftovers: uci `network.warp0`,
+  `network.warp0_v6`, their entries in firewall zone `wan`, `/etc/usque/up.sh`,
+  `/etc/usque/down.sh`. Kept `/etc/usque/warp0.json`. `fw4` reloaded, WAN verified after.
+- No test devices (`warp9`/`warp0`) and no test `ip rule` entries remain; nothing installed
+  from the tests; overlay free unchanged (3396K). Backups exist locally and on the router
+  (see step 1–2 evidence above) so everything is revertible.
+- Final state after phase 2 will be recorded here once the feed test completes.
