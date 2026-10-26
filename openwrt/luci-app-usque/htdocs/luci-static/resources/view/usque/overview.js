@@ -579,7 +579,25 @@ return view.extend({
 		o.placeholder = 'example.com';
 		o.modalonly = true;
 		o.depends('mode', 'custom');
-		o.description = _('Passed to usque as -s <sni> for non-Cloudflare endpoints. Leave empty to use the default.');
+		o.description = _('TLS server name for non-Cloudflare endpoints (-s). A hostname is fine here; leave empty to use the default (the endpoint IP).');
+
+		o = g.option(form.Value, 'authority', _('HTTP authority (custom mode)'));
+		o.default = '';
+		o.optional = true;
+		o.placeholder = 'https://cloudflareaccess.com';
+		o.modalonly = true;
+		o.depends('mode', 'custom');
+		o.description = _('CONNECT :authority presented to a non-Cloudflare MASQUE server (--authority). A bare host is normalised to https://<host>. Leave empty for the Cloudflare default.');
+
+		o = g.option(form.ListValue, 'protocol', _('CONNECT protocol (custom mode)'));
+		o.default = '';
+		o.optional = true;
+		o.rmempty = true;
+		o.modalonly = true;
+		o.depends('mode', 'custom');
+		o.value('', _('Default (cf-connect-ip, Cloudflare)'));
+		o.value('connect-ip', _('connect-ip (RFC 9484)'));
+		o.description = _('Protocol token for the CONNECT request (--protocol). Leave empty for Cloudflare (cf-connect-ip); pick connect-ip for RFC 9484 servers.');
 
 		o = g.option(form.ListValue, 'log_level', _('Log level'));
 		o.default = 'info';
@@ -673,7 +691,12 @@ return view.extend({
 			nodes.push(E('div', { 'class': 'alert-message notice' }, [
 				E('h4', {}, _('Custom endpoint (non-Cloudflare)')),
 				E('p', {}, _('Paste a MASQUE/Connect-IP configuration JSON. Required fields: private_key, endpoint_v4, endpoint_pub_key (PEM) and ipv4; optional: ipv6, endpoint_v6. The file is written atomically with mode 600 and contains the private key — treat it as a secret.')),
-				E('p', {}, _('Use the connection options (Edit in the table above) to set a TLS SNI (-s) if your endpoint needs one.'))
+				E('ul', {}, [
+					E('li', {}, _('endpoint_v4 and endpoint_v6 must be IP literals — the configuration file has no DNS field.')),
+					E('li', {}, _('Hostnames are only possible through the connection options: TLS SNI (-s) and HTTP authority (--authority), both may be hostnames.')),
+					E('li', {}, _('The server certificate is pinned by the SPKI in endpoint_pub_key, so self-signed certificates are fine as long as that key matches.'))
+				]),
+				E('p', {}, _('Edit the connection (pencil in the table above) to set sni, authority or protocol for custom mode.'))
 			]));
 
 			this.importArea = E('textarea', {

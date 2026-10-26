@@ -499,12 +499,24 @@ function rpcMethodsSince(index) {
 		const names = grid.options.map(function(o) { return o.option; });
 		[ 'enabled', 'interface', 'mode', 'default_route', 'ipv6_route', 'ipv6', 'metric',
 		  'config_file', 'mtu', 'endpoint_port', 'always_reconnect', 'auto_register',
-		  'device_name', 'sni', 'log_level' ].forEach(function(n) {
+		  'device_name', 'sni', 'authority', 'protocol', 'log_level' ].forEach(function(n) {
 			assert(names.indexOf(n) !== -1, 'grid option ' + n);
 		});
 		const settings = v.map.sections[0];
 		const snames = settings.options.map(function(o) { return o.option; });
 		assert(snames.indexOf('lan_ipv6') !== -1 && snames.indexOf('lan_ipv6_prefix') !== -1, 'lan ipv6 options');
+	});
+
+	await t('custom-mode extras (sni/authority/protocol) are modal options', function() {
+		const grid = v.map.sections[1];
+		[ 'sni', 'authority', 'protocol' ].forEach(function(name) {
+			const o = grid.options.filter(function(x) { return x.option === name; })[0];
+			assert(o && o.modalonly === true, name + ' is modalonly');
+		});
+		const proto = grid.options.filter(function(x) { return x.option === 'protocol'; })[0];
+		const values = proto.values.map(function(v) { return v[0]; });
+		assert(values.indexOf('') !== -1 && values.indexOf('connect-ip') !== -1,
+			'protocol values: ' + JSON.stringify(values));
 	});
 
 	await t('default_route defaults to OFF (opt-in)', function() {
@@ -686,6 +698,8 @@ function rpcMethodsSince(index) {
 		v.accountSectionFor = null;
 		v.updateAccountSection();
 		assert(/Custom endpoint/.test(textOf(v.acctBody)), 'custom hint');
+		assert(/IP literals/.test(textOf(v.acctBody)), 'IP literal hint');
+		assert(/SPKI/.test(textOf(v.acctBody)), 'SPKI pinning hint');
 		assert(v.importArea, 'textarea exists');
 	});
 
