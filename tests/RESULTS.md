@@ -193,7 +193,9 @@ Two implementation notes from this run:
 - The phase-1 hook (`tests/router/p1-up.sh`) installs the mwan3 workaround rule; the packaged
   hook must do the same for phase 2 to show `warp=on` (see Finding 2 above).
 
-## Phase 2 — signed apk feed, procd service, LuCI, IPv6/NAT66, reboot — **PASS (2 known issues fixed in 0.2.1-r1)**
+## Phase 2 — signed apk feed, procd service, LuCI, IPv6/NAT66, reboot — **PASS on final release**
+Final verified versions: **usque 0.2.1-r1 + luci-app-usque 1.1.1-r1** (run 40373166952,
+head 5139af6; binary 2,905,040 B; apks 1,466,405 B / 21,561 B).
 
 Feed: **live GitHub Pages feed**, exactly as the docs say (no `--allow-untrusted`):
 
@@ -256,49 +258,63 @@ already-installed luci-app-usque on this apk-tools 3.0.5 (`apk list` showed
 | Unauthenticated LuCI page → 403 (login required) | PASS | no password used per Lead's instruction |
 | Reboot: service ENabled/auto-start, warp0 up, WAN v4 default only, v6 via WARP, LuCI reachable | PASS 7/7 | `phase2-reboot.log` |
 
-### Known issues in 0.2.0-r1 (both fixed in 0.2.1-r1, re-test pending)
+### 0.2.1-r1 re-test (both earlier issues FIXED — verified on the live router)
 
-1. **stop→start race (intermittent)**: after `restart`, the new daemon attached to a lingering
-   `warp0` tun and died with `Error: failed to add IPv4 address / netlink error File exists
-   (os error 17)`; procd respawned 10 s later and recovered. Reproduction rate ~1 in 2 early on;
-   later 3× restart loop showed none. Suggested fix: treat EEXIST as success in the daemon;
-   init waits for the tun to disappear before start.
-2. **default_route 1→0 revert leaves the IPv4 priority-1000 rule** and stale owner state in
-   `/var/run/usque/shared/iprule-v4{,.added}`. Root cause: `del_v4_default()` starts with
-   `[ "$DEFAULT_ROUTE" = 1 ] || return 0`, so a stop performed with the *new* config
-   (`default_route=0`) never unwinds what was installed under the old config. The route itself
-   is removed by the init fallback, so connectivity is fine, but the rule must not survive.
-   Suggested fix: make teardown state-driven (owner files / kernel presence), not
-   config-driven. Evidence: [`tests/artifacts/bug-default-route-rule-leftover.txt`](artifacts/bug-default-route-rule-leftover.txt).
-3. **Boot order**: at boot the daemon starts before the tether's default route exists, logs
-   `sendmsg error: Network unreachable`, and reconnects only when WAN comes up (~83 s in this
-   reboot). Self-recovers, but a short "wait for a default route" in init would make IPv6
-   available much sooner after boot.
+Upgrade command used (important, see docs note above):
+`apk update && apk add usque=0.2.1-r1 luci-app-usque=1.1.1-r1`
+→ upgraded both packages, `OK: 43.2 MiB in 270 packages`, overlay 1584 KiB free, service kept
+running, all defaults preserved (`default_route=0`, `ipv6_route=auto`, `enabled=1`).
 
-## Router left in state (final, 2026-10-26 ~18:57 CET)
+| Re-test | Result | Evidence |
+| --- | --- | --- |
+| **Restart ×5, EEXIST fix** — every restart spawns a fresh pid, no `failed to add IPv4 address`, no 10 s respawn delay | **PASS** | pids 27118 → 27962 → 28490 → 29001 → 29472 → 29959, each `status=running`, EEXIST delta 0, link up immediately |
+| **Stop cleanliness** — stop leaves no instance/process, no tun, no v4/v6 defaults or rules, empty state dir | **PASS** | ubus pid `[]`, `pgrep` 0, `ip -br link show warp0` → absent, only WAN v4 default, `[v6def empty]`, no rules, `/var/run/usque/shared/` empty |
+| **Start after stop** | **PASS** | new pid 30499, running, WAN v4 default only, v6 default back |
+| **default_route 1→0 revert (state-driven teardown fix)** — no v4 rule 1000, no warp0 v4 default, v4 owner state purged, v6 auto route+rule unaffected | **PASS** | after revert: `ip rule show` has no 1000; `ip -4 route show default` = WAN only; `/var/run/usque/shared/` contains only `iprule-v6`, `iprule-v6.added`, `v6-default`; v6 default via warp0 + v6 rule 1000 present; egress v4 `warp=off`, v6 `warp=on` |
+| Opt-in `default_route=1` still works on 0.2.1 | **PASS** | v4 default via warp0 + rule 1000, `ip route get` → `dev warp0 src 172.16.0.2`, 3/3 curl traces `warp=on ip=<WARP_EGRESS_IP>` |
+| LAN IPv6/NAT66 on 0.2.1 (packaged helper, Mac ULA `fd12:…`) | **PASS** | Mac `curl -6` → `warp=on ip=<WARP_EGRESS_IP> colo=VIE`; revert clean |
+| Multi-instance on 0.2.1 (`warp1` second section, custom mode) | **PASS** | both links UP, both hooks ran; warp1 `default_route=0/ipv6_route=off` → "no routing changes requested" |
+| Custom mode on 0.2.1 (`warp2`/`custom0`) | **PASS** | instance up, no auto-register, hook made no routing changes; `sni`/`authority`/`protocol` reach the daemon (see proc cmdline in 0.2.0 section) |
+| LuCI 1.1.1-r1 ubus: `status/getConfig/test/logs` per section | **PASS** | status `connections[]` + `globals`; getConfig no secrets; `test` → `warp=on ip=<WARP_EGRESS_IP> colo=VIE`, `method: curl --interface warp0`; no `private_key`/`access_token` in any output |
+| Reboot on the final release | not re-run (no need) | 0.2.0-r1 reboot was PASS 7/7; boot order noted as known behaviour |
 
-Installed and running the shipped v2 defaults (this is the user's working setup):
+Both previously reported defects are **FIXED and verified**:
+
+1. ~~stop→start EEXIST race~~ — fixed by daemon EEXIST tolerance + init waiting for/deleting a
+   stale interface. Verified by 5× restart with a fresh pid each time and zero
+   `failed to add IPv4 address` lines, plus a full stop→start cycle.
+2. ~~default_route 1→0 revert leaves the IPv4 priority-1000 rule + stale state~~ — fixed by
+   state-driven teardown (ownership records + kernel presence). Verified with the exact repro:
+   rule gone, no warp0 v4 default, v4 owner state purged, legitimate v6 auto state retained.
+
+Known minor behaviour (documented, not fixed in this release): after a reboot the daemon
+starts before the tether's default route exists (log: `sendmsg error: Network unreachable`) and
+reconnects when WAN comes up (~83 s in the 0.2.0-r1 reboot). Self-recovers; IPv4/IPv6 for LAN
+clients follows once connected.
+
+## Router left in state (final, verified 2026-10-26 19:04 CET)
+
+Full dump: [`tests/artifacts/phase2-final-state-0.2.1.txt`](artifacts/phase2-final-state-0.2.1.txt).
 
 ```
-usque.warp0.enabled=1   mode=cloudflare   interface=warp0
-usque.warp0.default_route=0   ipv6=1   ipv6_route=auto   mtu=1400
-usque.settings.lan_ipv6=0
-apk: usque-0.2.0-r1, luci-app-usque-1.1.0-r1 (from the live Pages feed)
+apk: usque-0.2.1-r1 + luci-app-usque-1.1.1-r1 (from the live Pages feed)
+df -k /overlay: 19036 total, 16436 used, 1584 available (91%)
+/etc/init.d/usque status: running        boot_enabled: yes (ubus instance pid 30499)
+usque.warp0: enabled=1 mode=cloudflare interface=warp0 mtu=1400 ipv6=1 endpoint_ipv6=0
+             ipv6_route=auto default_route=0 metric=0 endpoint_port=443 always_reconnect=1
+usque.settings: lan_ipv6=0 lan_ipv6_prefix=""
+ip -4 route show default: default via 172.20.10.1 dev phy0-tether proto static src 172.20.10.13 metric 1   ← only v4 default
+ip -6 route show default: default dev warp0 metric 1024 pref medium                                        ← ipv6_route=auto
+ip rule show:   no priority-1000 rule (only mwan3's 1001/2001/2061/2062/3001 + main)
+ip -6 rule show: 1000: from all lookup main   ← required for IPv6 over mwan3
+egress v4: ip=<WAN_IP> warp=off colo=VIE
+egress v6: ip=<WARP_EGRESS_IP> warp=on colo=VIE
+link: warp0 UP; addrs 172.16.0.2/32 + <WARP_CLIENT_IPV6>/128
 ```
 
-- `ip -4 route show default` → **only** `default via 172.20.10.1 dev phy0-tether metric 1`
-  (no v4 takeover, no endpoint bypass, no v4 policy rule).
-- `ip -6 route show default` → `default dev warp0 metric 1024` (ipv6_route=auto, by design) with
-  the IPv6 priority-1000 rule; router IPv6 egress `warp=on` (`<WARP_EGRESS_IP>`, colo VIE).
-- No leftover state from the tests: all temporary sections (`warp1`, `warp2`, `warp3`,
-  `custom0`, `custom1`) removed, no `ip rule` 1000 in the v4 table, no `warp9`-era files
-  (removed `/tmp/usque-test` test binary/scripts; backups kept only under
-  `tests/backups/` on the Mac; router-side mirror under `/tmp/usque-test/backup-*` if still
-  present).
-- `/etc/apk/keys/usque.pem` + `/etc/apk/repositories.d/usque.list` (Pages) remain, so
-  `apk upgrade` works as documented.
-- Overlay free: **1572 KiB** (tight — dropping h2 already gave some margin; watch future growth).
-- Stale hand-copied leftovers (`network.warp0`, `warp0_v6`, old `up.sh`/`down.sh`) remain
-  removed; `/etc/usque/warp0.json` kept (no new device registered).
-- Backups for full revert: `tests/backups/pre-phase2-20261026-172340/` and
-  `/tmp/usque-test/backup-20261026-172340/` on the router (tmpfs).
+Cleanup state: no test sections left (`uci show usque` has only `settings` + `warp0`); no
+`warp9`/`warp1`/`warp2`/`warp3`/`custom*` interfaces or uci sections; `/tmp/usque-test`
+removed from the router; `/etc/apk/keys/usque.pem` + `/etc/apk/repositories.d/usque.list`
+(Pages) kept so `apk` upgrades keep working; stale hand-copied `network.warp0`/`warp0_v6`
+leftovers remain removed; `/etc/usque/warp0.json` kept (no new device registered).
+Revert material: `tests/backups/pre-phase2-20261026-172340/` (Mac).
