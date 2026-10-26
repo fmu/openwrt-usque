@@ -1,0 +1,769 @@
+#!/bin/sh
+# luci.usque - rpcd backend for luci-app-usque (LuCI for usque / Cloudflare WARP)
+#
+# Plain /bin/sh + jshn (libubox) + uci/jsonfilter/ip/logread: no dependencies
+# beyond what a base OpenWrt 25.12 system already provides.
+#
+# References:
+#   ubus -v list luci.usque
+#   ubus -S call luci.usque status
+#   ubus -S call luci.usque getConfig
+#   ubus -S call luci.usque register '{"name":"router","accept_tos":true}'
+#   ubus -S call luci.usque registerStatus
+#   ubus -S call luci.usque setInitAction '{"action":"restart"}'
+#   ubus -S call luci.usque test
+#   ubus -S call luci.usque logs
+#   ubus -S call luci.usque deleteConfig
+#
+# Never expose private_key/access_token: getConfig only picks public fields and
+# registration output is redacted before it leaves this script.
+
+. /usr/share/libubox/jshn.sh 2>/dev/null || {
+	# Without jshn there is nothing we can do; still answer in valid JSON.
+	printf '{"ok":false,"error":"libubox jshn.sh is missing"}\n'
+	exit 0
+}
+
+USQUE_BIN="${USQUE_BIN:-/usr/bin/usque}"
+INIT_SCRIPT="${INIT_SCRIPT:-/etc/init.d/usque}"
+DEFAULT_CONFIG="/etc/usque/warp0.json"
+
+RUN_DIR="/tmp/luci-usque"
+REG_LOG="$RUN_DIR/register.log"
+REG_DONE="$RUN_DIR/register.done"
+REG_PIDFILE="$RUN_DIR/register.pid"
+REG_STARTED="$RUN_DIR/register.started"
+REG_TIMEOUT_MARK="$RUN_DIR/register.timeout"
+REG_TIMEOUT=90
+
+TRACE_URL="https://www.cloudflare.com/cdn-cgi/trace"
+
+umask 077
+
+# ---------------------------------------------------------------------------
+# output helpers
+# ---------------------------------------------------------------------------
+
+reply_error() {
+	json_init
+	json_add_boolean ok 0
+	json_add_string error "$1"
+	json_dump
+	json_cleanup
+	exit 0
+}
+
+json_add_bool() {
+	# json_add_bool <name> <0|1>
+	if [ "$2" = 1 ]; then
+		json_add_boolean "$1" 1
+	else
+		json_add_boolean "$1" 0
+	fi
+}
+
+json_add_str() {
+	# json_add_str <name> <value> - always a JSON string, empty values included
+	json_add_string "$1" "$2"
+}
+
+# ---------------------------------------------------------------------------
+# small helpers
+# ---------------------------------------------------------------------------
+
+uci_get() {
+	uci -q get "usque.main.$1" 2>/dev/null
+}
+
+bool_val() {
+	case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+		1|on|true|yes|enabled) printf '1' ;;
+		*) printf '0' ;;
+	esac
+}
+
+config_path() {
+	local f
+
+	f="$(uci_get config_file)"
+	[ -n "$f" ] || f="$DEFAULT_CONFIG"
+	case "$f" in
+		/*) ;;
+		*) f="$DEFAULT_CONFIG" ;;
+	esac
+	case "$f" in
+		*..*) f="$DEFAULT_CONFIG" ;;
+	esac
+	printf '%s' "$f"
+}
+
+iface_name() {
+	local i
+
+	i="$(uci_get interface)"
+	[ -n "$i" ] || i="warp0"
+	printf '%s' "$i"
+}
+
+service_enabled() {
+	[ -x "$INIT_SCRIPT" ] || { printf '0'; return; }
+	"$INIT_SCRIPT" enabled >/dev/null 2>&1 && printf '1' || printf '0'
+}
+
+service_running() {
+	[ -x "$INIT_SCRIPT" ] || { printf '0'; return; }
+	"$INIT_SCRIPT" running >/dev/null 2>&1 && printf '1' || printf '0'
+}
+
+tunnel_pid() {
+	local pid
+
+	pid="$(pgrep -f 'native-tun' 2>/dev/null | head -n 1)"
+	case "$pid" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$pid" ;; esac
+}
+
+proc_uptime() {
+	local pid start now up
+
+	pid="$1"
+	[ -n "$pid" ] && [ -r "/proc/$pid/stat" ] || return 0
+	start="$(awk '{ print $22 }' "/proc/$pid/stat" 2>/dev/null)"
+	now="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+	case "$start" in ''|*[!0-9]*) return 0 ;; esac
+	case "$now" in ''|*[!0-9]*) return 0 ;; esac
+	up=$(( now - start / 100 ))
+	[ "$up" -ge 0 ] || up=0
+	printf '%s' "$up"
+}
+
+iface_exists() {
+	[ -n "$1" ] && [ -e "/sys/class/net/$1" ] && printf '1' || printf '0'
+}
+
+iface_up() {
+	[ -n "$1" ] || { printf '0'; return; }
+	ip -o link show dev "$1" 2>/dev/null | grep -q 'UP' && printf '1' || printf '0'
+}
+
+iface_addr() {
+	# iface_addr <iface> <4|6> - first address without prefix length
+	local addr
+
+	if [ "$2" = 6 ]; then
+		addr="$(ip -o -6 addr show dev "$1" scope global 2>/dev/null | \
+			awk '{ for (i = 1; i <= NF; i++) if ($i == "inet6") { print $(i + 1); exit } }')"
+	else
+		addr="$(ip -o -4 addr show dev "$1" 2>/dev/null | \
+			awk '{ for (i = 1; i <= NF; i++) if ($i == "inet") { print $(i + 1); exit } }')"
+	fi
+	printf '%s' "${addr%%/*}"
+}
+
+route_via_iface() {
+	[ -n "$1" ] || { printf '0'; return; }
+	ip route show default 2>/dev/null | grep -q "dev $1 " && printf '1' || printf '0'
+}
+
+# strip anything that could be a secret from text shown in the UI
+sanitize_text() {
+	sed -e 's/"private_key"[[:space:]]*:[[:space:]]*"[^"]*"/"private_key":"[redacted]"/g' \
+	    -e 's/"access_token"[[:space:]]*:[[:space:]]*"[^"]*"/"access_token":"[redacted]"/g' \
+	    -e 's/[A-Za-z0-9+\/]\{50,\}=\{0,2\}/[redacted]/g' \
+	    -e '/-----BEGIN [A-Z ]*PRIVATE KEY-----/,/-----END [A-Z ]*PRIVATE KEY-----/d'
+}
+
+# ---------------------------------------------------------------------------
+# WARP config file (public fields only)
+# ---------------------------------------------------------------------------
+
+CFG_OK=0
+CFG_ID=''
+CFG_V4=''
+CFG_V6=''
+CFG_EP4=''
+CFG_EP6=''
+CFG_EPH2_4=''
+CFG_EPH2_6=''
+CFG_MODE=''
+CFG_SIZE=0
+
+load_config() {
+	local f="$1"
+
+	CFG_OK=0
+	CFG_ID=''; CFG_V4=''; CFG_V6=''
+	CFG_EP4=''; CFG_EP6=''; CFG_EPH2_4=''; CFG_EPH2_6=''
+
+	[ -n "$f" ] && [ -f "$f" ] && [ -s "$f" ] || return 1
+	# validate the JSON before eval'ing jshn output
+	jshn -R "$f" >/dev/null 2>&1 || return 1
+	json_init
+	json_load_file "$f"
+	json_get_var CFG_ID id
+	json_get_var CFG_V4 ipv4
+	json_get_var CFG_V6 ipv6
+	json_get_var CFG_EP4 endpoint_v4
+	json_get_var CFG_EP6 endpoint_v6
+	json_get_var CFG_EPH2_4 endpoint_h2_v4
+	json_get_var CFG_EPH2_6 endpoint_h2_v6
+	json_cleanup
+	CFG_OK=1
+	return 0
+}
+
+config_mode() {
+	# symbolic permissions like "-rw-------" (busybox stat is not available
+	# on all OpenWrt builds, ls -l is)
+	ls -ld "$1" 2>/dev/null | cut -c1-10
+}
+
+config_size() {
+	local sz
+
+	sz="$(wc -c < "$1" 2>/dev/null | tr -d ' ')"
+	case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
+	printf '%s' "$sz"
+}
+
+cfg_secure() {
+	# private key material => owner read/write only, no group/other bits
+	local p="$1" own rest
+
+	[ -n "$p" ] || { printf '0'; return; }
+	own="${p#?}"
+	rest="${p#????}"
+	case "$own" in
+		r*) ;;
+		*) printf '0'; return ;;
+	esac
+	[ "$rest" = "------" ] && printf '1' || printf '0'
+}
+
+# adds the sanitized account summary as nested "config" object
+add_config_object() {
+	json_add_object config
+	json_add_bool exists "$1"
+	json_add_bool valid "$CFG_OK"
+	json_add_str path "$2"
+	json_add_str id "$CFG_ID"
+	json_add_str ipv4 "$CFG_V4"
+	json_add_str ipv6 "$CFG_V6"
+	json_add_str endpoint_v4 "$CFG_EP4"
+	json_add_str endpoint_v6 "$CFG_EP6"
+	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
+	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
+	json_add_str mode "$CFG_MODE"
+	json_add_int size "$CFG_SIZE"
+	json_close_object
+}
+
+# ---------------------------------------------------------------------------
+# methods
+# ---------------------------------------------------------------------------
+
+do_status() {
+	local cfg iface enabled running pid uptime mtu exists valid secure
+
+	cfg="$(config_path)"
+	iface="$(iface_name)"
+	enabled="$(service_enabled)"
+	running="$(service_running)"
+	pid="$(tunnel_pid)"
+	uptime="$(proc_uptime "$pid")"
+	mtu="$(uci_get mtu)"
+
+	load_config "$cfg"
+	exists=0; [ -f "$cfg" ] && exists=1
+	valid="$CFG_OK"
+	CFG_MODE="$(config_mode "$cfg")"
+	CFG_SIZE="$(config_size "$cfg")"
+	secure="$(cfg_secure "$CFG_MODE")"
+	[ "$exists" = 1 ] || secure=0
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool installed "$([ -x "$USQUE_BIN" ] && printf 1 || printf 0)"
+	json_add_bool init_script "$([ -x "$INIT_SCRIPT" ] && printf 1 || printf 0)"
+	json_add_bool enabled "$enabled"
+	json_add_bool running "$running"
+	json_add_int pid "${pid:-0}"
+	json_add_int uptime "${uptime:-0}"
+	json_add_str iface "$iface"
+	json_add_bool iface_exists "$(iface_exists "$iface")"
+	json_add_bool iface_up "$(iface_up "$iface")"
+	json_add_str iface_ipv4 "$(iface_addr "$iface" 4)"
+	json_add_str iface_ipv6 "$(iface_addr "$iface" 6)"
+	json_add_bool default_route_via_iface "$(route_via_iface "$iface")"
+	json_add_str config_path "$cfg"
+	json_add_bool config_exists "$exists"
+	json_add_bool config_valid "$valid"
+	json_add_bool config_secure "$secure"
+	json_add_str config_mode "$CFG_MODE"
+	json_add_int config_size "$CFG_SIZE"
+	json_add_str device_id "$CFG_ID"
+	json_add_str warp_ipv4 "$CFG_V4"
+	json_add_str warp_ipv6 "$CFG_V6"
+	json_add_str endpoint_v4 "$CFG_EP4"
+	json_add_str endpoint_v6 "$CFG_EP6"
+	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
+	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
+	json_add_str mtu "${mtu:-}"
+	json_dump
+	json_cleanup
+}
+
+do_get_config() {
+	local cfg exists secure
+
+	cfg="$(config_path)"
+	exists=0; [ -f "$cfg" ] && exists=1
+	load_config "$cfg"
+	CFG_MODE="$(config_mode "$cfg")"
+	CFG_SIZE="$(config_size "$cfg")"
+	secure="$(cfg_secure "$CFG_MODE")"
+	[ "$exists" = 1 ] || secure=0
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool exists "$exists"
+	json_add_bool secure "$secure"
+	json_add_str path "$cfg"
+	json_add_str mode "$CFG_MODE"
+	json_add_int size "$CFG_SIZE"
+	json_add_str id "$CFG_ID"
+	json_add_str ipv4 "$CFG_V4"
+	json_add_str ipv6 "$CFG_V6"
+	json_add_str endpoint_v4 "$CFG_EP4"
+	json_add_str endpoint_v6 "$CFG_EP6"
+	json_add_str endpoint_h2_v4 "$CFG_EPH2_4"
+	json_add_str endpoint_h2_v6 "$CFG_EPH2_6"
+	json_dump
+	json_cleanup
+}
+
+register_running() {
+	local pid
+
+	[ -f "$REG_PIDFILE" ] || return 1
+	pid="$(cat "$REG_PIDFILE" 2>/dev/null)"
+	case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+	[ -d "/proc/$pid" ] || return 1
+	# protect against pid reuse
+	grep -qs 'usque' "/proc/$pid/cmdline" 2>/dev/null || return 1
+	return 0
+}
+
+do_register() {
+	local name tos cfg dir clean
+
+	json_get_var name name
+	json_get_var tos accept_tos
+	name="${name# }"
+	name="${name% }"
+
+	[ "$(bool_val "$tos")" = 1 ] || \
+		reply_error "You must accept the Cloudflare WARP Terms of Service"
+
+	[ -x "$USQUE_BIN" ] || \
+		reply_error "usque binary not found at $USQUE_BIN (is the usque package installed?)"
+
+	register_running && \
+		reply_error "A registration is already running, please wait for it to finish"
+
+	if [ -n "$name" ]; then
+		clean="$(printf '%s' "$name" | tr -cd 'A-Za-z0-9._ -')"
+		[ "$clean" = "$name" ] || \
+			reply_error "Device name contains invalid characters (allowed: letters, digits, space, '.', '_', '-')"
+		[ "${#name}" -le 64 ] || \
+			reply_error "Device name is too long (max 64 characters)"
+	fi
+
+	cfg="$(config_path)"
+	dir="$(dirname "$cfg")"
+	mkdir -p "$dir" 2>/dev/null
+	[ -d "$dir" ] || reply_error "Cannot create configuration directory $dir"
+
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	chmod 700 "$RUN_DIR" 2>/dev/null
+	[ -d "$RUN_DIR" ] || reply_error "Cannot create $RUN_DIR"
+
+	rm -f "$REG_LOG" "$REG_DONE" "$REG_PIDFILE" "$REG_TIMEOUT_MARK" 2>/dev/null
+	: > "$REG_LOG" 2>/dev/null || reply_error "Cannot write $REG_LOG"
+	date +%s > "$REG_STARTED" 2>/dev/null
+
+	if [ -n "$name" ]; then
+		set -- "$USQUE_BIN" --config "$cfg" register --accept-tos --force -n "$name"
+	else
+		set -- "$USQUE_BIN" --config "$cfg" register --accept-tos --force
+	fi
+
+	# Run in the background so the ubus/RPC call returns immediately; the UI
+	# polls registerStatus. A watchdog kills a hung registration after
+	# $REG_TIMEOUT seconds.
+	sh -c '
+log="$1"; donef="$2"; pidf="$3"; tmf="$4"; to="$5"; cf="$6"
+shift 6
+: >"$log" 2>/dev/null
+"$@" >>"$log" 2>&1 &
+cpid=$!
+printf "%s\n" "$cpid" >"$pidf"
+( sleep "$to"; : >"$tmf"; kill -TERM "$cpid" 2>/dev/null; sleep 3; kill -KILL "$cpid" 2>/dev/null ) >/dev/null 2>&1 &
+wd=$!
+wait "$cpid"
+rc=$?
+kill "$wd" 2>/dev/null
+if [ "$rc" = 0 ] && [ -s "$cf" ]; then
+	chmod 600 "$cf" 2>/dev/null
+	d=$(dirname "$cf"); [ -n "$d" ] && chmod 700 "$d" 2>/dev/null
+fi
+printf "%s\n" "$rc" >"$donef"
+' register "$REG_LOG" "$REG_DONE" "$REG_PIDFILE" "$REG_TIMEOUT_MARK" \
+		"$REG_TIMEOUT" "$cfg" "$@" </dev/null >/dev/null 2>&1 &
+
+	logger -t luci-usque "started WARP registration (config=$cfg name=${name:-default})" 2>/dev/null
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool started 1
+	json_add_str path "$cfg"
+	json_add_str name "$name"
+	json_dump
+	json_cleanup
+}
+
+do_register_status() {
+	local running done rc elapsed started now out tout cfg exists
+
+	running=0
+	done=0
+	tout=0
+	rc=''
+	elapsed=0
+	cfg="$(config_path)"
+
+	if [ -f "$REG_DONE" ]; then
+		done=1
+		rc="$(cat "$REG_DONE" 2>/dev/null)"
+		case "$rc" in ''|*[!0-9]*) rc='' ;; esac
+	elif register_running; then
+		running=1
+	fi
+	if [ -f "$REG_STARTED" ]; then
+		started="$(cat "$REG_STARTED" 2>/dev/null)"
+		now="$(date +%s 2>/dev/null)"
+		case "$started" in
+			''|*[!0-9]*) ;;
+			*)
+				case "$now" in
+					''|*[!0-9]*) ;;
+					*)
+						elapsed=$(( now - started ))
+						[ "$elapsed" -ge 0 ] || elapsed=0
+					;;
+				esac
+			;;
+		esac
+	fi
+	[ -f "$REG_TIMEOUT_MARK" ] && tout=1
+
+	exists=0; [ -f "$cfg" ] && exists=1
+	load_config "$cfg"
+	CFG_MODE="$(config_mode "$cfg")"
+	CFG_SIZE="$(config_size "$cfg")"
+
+	out="$(tail -n 25 "$REG_LOG" 2>/dev/null | sanitize_text 2>/dev/null | tail -c 1500)"
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool running "$running"
+	json_add_bool done "$done"
+	json_add_bool timed_out "$tout"
+	if [ -n "$rc" ]; then
+		json_add_int rc "$rc"
+	else
+		json_add_null rc
+	fi
+	json_add_int elapsed "$elapsed"
+	json_add_str output "$out"
+	json_add_str path "$cfg"
+	json_add_bool config_exists "$exists"
+	add_config_object "$exists" "$cfg"
+	json_dump
+	json_cleanup
+}
+
+do_set_init_action() {
+	local action out rc rcstr
+
+	json_get_var action action
+
+	case "$action" in
+		start|stop|restart|enable|disable) ;;
+		*) reply_error "Invalid action '${action}', expected start|stop|restart|enable|disable" ;;
+	esac
+
+	[ -x "$INIT_SCRIPT" ] || \
+		reply_error "Service script $INIT_SCRIPT not found (is the usque package installed?)"
+
+	out="$("$INIT_SCRIPT" "$action" 2>&1)"
+	rc=$?
+	out="$(printf '%s\n' "$out" | tail -n 15)"
+	if [ "$rc" -eq 0 ]; then rcstr=1; else rcstr=0; fi
+
+	logger -t luci-usque "init action '$action' rc=$rc" 2>/dev/null
+
+	json_init
+	json_add_bool ok "$rcstr"
+	json_add_str action "$action"
+	json_add_int rc "$rc"
+	json_add_str output "$out"
+	if [ "$rc" -ne 0 ]; then
+		json_add_str error "init.d action '$action' failed (rc=$rc)"
+	fi
+	json_dump
+	json_cleanup
+}
+
+fetch_trace() {
+	# sets TRACE_BODY/TRACE_METHOD, returns 0 on success
+	local bind="$1" tmp
+
+	TRACE_BODY=''
+	TRACE_METHOD=''
+	mkdir -p "$RUN_DIR" 2>/dev/null
+	tmp="$RUN_DIR/trace.$$"
+	rm -f "$tmp"
+
+	if command -v curl >/dev/null 2>&1; then
+		if [ -n "$bind" ]; then
+			curl -m 6 -sS --interface "$bind" -o "$tmp" "$TRACE_URL" >/dev/null 2>&1
+			if [ -s "$tmp" ]; then
+				TRACE_BODY="$(cat "$tmp")"
+				TRACE_METHOD="curl --interface $bind"
+				rm -f "$tmp"
+				return 0
+			fi
+		fi
+		curl -m 6 -sS -o "$tmp" "$TRACE_URL" >/dev/null 2>&1
+		if [ -s "$tmp" ]; then
+			TRACE_BODY="$(cat "$tmp")"
+			TRACE_METHOD="curl"
+			rm -f "$tmp"
+			return 0
+		fi
+	fi
+
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$tmp" -T 6 "$TRACE_URL" >/dev/null 2>&1
+		if [ -s "$tmp" ]; then
+			TRACE_BODY="$(cat "$tmp")"
+			TRACE_METHOD="uclient-fetch"
+			rm -f "$tmp"
+			return 0
+		fi
+	fi
+
+	if command -v wget >/dev/null 2>&1; then
+		wget -q -O "$tmp" -T 6 "$TRACE_URL" >/dev/null 2>&1
+		if [ -s "$tmp" ]; then
+			TRACE_BODY="$(cat "$tmp")"
+			TRACE_METHOD="wget"
+			rm -f "$tmp"
+			return 0
+		fi
+	fi
+
+	rm -f "$tmp"
+	return 1
+}
+
+do_test() {
+	local cfg iface bound warp ip colo loc gw ts raw
+
+	cfg="$(config_path)"
+	iface="$(iface_name)"
+	load_config "$cfg"
+
+	bound=0
+	if [ "$(iface_exists "$iface")" = 1 ]; then
+		fetch_trace "$iface"
+	else
+		fetch_trace ""
+	fi
+	case "$TRACE_METHOD" in
+		*--interface*) bound=1 ;;
+	esac
+
+	if [ -z "$TRACE_BODY" ]; then
+		json_init
+		json_add_boolean ok 0
+		json_add_str warp unknown
+		json_add_bool bound 0
+		json_add_str error "No egress test could be performed (no curl/uclient-fetch/wget, or no connectivity)"
+		json_dump
+		json_cleanup
+		return
+	fi
+
+	warp="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^warp=//p' | head -n 1)"
+	ip="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^ip=//p' | head -n 1)"
+	colo="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^colo=//p' | head -n 1)"
+	loc="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^loc=//p' | head -n 1)"
+	gw="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^gateway=//p' | head -n 1)"
+	ts="$(printf '%s\n' "$TRACE_BODY" | sed -n 's/^ts=//p' | head -n 1)"
+	raw="$(printf '%s' "$TRACE_BODY" | head -c 2000)"
+
+	case "$warp" in
+		on|off) ;;
+		*) warp=unknown ;;
+	esac
+	json_init
+	json_add_boolean ok 1
+	json_add_str warp "$warp"
+	json_add_str ip "$ip"
+	json_add_str colo "$colo"
+	json_add_str loc "$loc"
+	json_add_str gateway "$gw"
+	json_add_str trace_ts "$ts"
+	json_add_str timestamp "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
+	json_add_str method "$TRACE_METHOD"
+	json_add_bool bound "$bound"
+	json_add_str raw "$raw"
+	json_dump
+	json_cleanup
+}
+
+do_logs() {
+	local out count
+
+	out="$(logread -e usque 2>/dev/null | tail -n 80)"
+	count="$(printf '%s\n' "$out" | grep -c . 2>/dev/null)"
+
+	json_init
+	json_add_boolean ok 1
+	json_add_str lines "$out"
+	json_add_int count "${count:-0}"
+	json_dump
+	json_cleanup
+}
+
+do_fix_config_perms() {
+	local cfg mode sec
+
+	cfg="$(config_path)"
+	[ -f "$cfg" ] || reply_error "Configuration file $cfg does not exist"
+
+	chmod 600 "$cfg" 2>/dev/null
+	mode="$(config_mode "$cfg")"
+	sec="$(cfg_secure "$mode")"
+	if [ "$sec" != 1 ]; then
+		reply_error "Could not restrict permissions of $cfg (current mode: ${mode:-unknown})"
+	fi
+
+	logger -t luci-usque "restricted permissions of $cfg to 600" 2>/dev/null
+
+	json_init
+	json_add_boolean ok 1
+	json_add_str path "$cfg"
+	json_add_str mode "$mode"
+	json_dump
+	json_cleanup
+}
+
+do_delete_config() {
+	local cfg was_running
+
+	cfg="$(config_path)"
+
+	case "$cfg" in
+		/etc/usque/*) ;;
+		*) reply_error "Refusing to delete '$cfg': path is outside /etc/usque" ;;
+	esac
+	[ "$cfg" = "/etc/usque/" ] && reply_error "Invalid configuration path"
+
+	was_running="$(service_running)"
+	if [ "$was_running" = 1 ]; then
+		"$INIT_SCRIPT" stop >/dev/null 2>&1
+	fi
+
+	rm -f "$cfg" 2>/dev/null
+	[ -f "$cfg" ] && reply_error "Failed to remove $cfg"
+
+	rm -f "$REG_DONE" "$REG_LOG" "$REG_PIDFILE" "$REG_STARTED" "$REG_TIMEOUT_MARK" 2>/dev/null
+	logger -t luci-usque "removed WARP configuration $cfg" 2>/dev/null
+
+	json_init
+	json_add_boolean ok 1
+	json_add_bool deleted 1
+	json_add_str path "$cfg"
+	json_add_bool was_running "$was_running"
+	json_dump
+	json_cleanup
+}
+
+# ---------------------------------------------------------------------------
+# rpcd entry points
+# ---------------------------------------------------------------------------
+
+list_methods() {
+	json_init
+	json_add_object status
+	json_close_object
+	json_add_object getConfig
+	json_close_object
+	json_add_object register
+		json_add_string name "String"
+		json_add_string accept_tos "String"
+	json_close_object
+	json_add_object registerStatus
+	json_close_object
+	json_add_object setInitAction
+		json_add_string action "String"
+	json_close_object
+	json_add_object test
+	json_close_object
+	json_add_object logs
+	json_close_object
+	json_add_object deleteConfig
+	json_close_object
+	json_add_object fixConfigPermissions
+	json_close_object
+	json_dump
+	json_cleanup
+}
+
+read_input() {
+	local input
+
+	input="$(cat 2>/dev/null)"
+	[ -n "$input" ] || input='{}'
+	json_load "$input" 2>/dev/null
+}
+
+handle_call() {
+	case "$1" in
+		status)         do_status ;;
+		getConfig)      do_get_config ;;
+		register)       read_input; do_register ;;
+		registerStatus) do_register_status ;;
+		setInitAction)  read_input; do_set_init_action ;;
+		test)           do_test ;;
+		logs)           do_logs ;;
+		deleteConfig)   do_delete_config ;;
+		fixConfigPermissions) do_fix_config_perms ;;
+		*)              reply_error "Unknown method '$1'" ;;
+	esac
+}
+
+case "$1" in
+	list)
+		list_methods
+		;;
+	call)
+		handle_call "$2"
+		;;
+	*)
+		echo "usage: $0 list|call <method>" >&2
+		exit 1
+		;;
+esac

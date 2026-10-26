@@ -1,0 +1,32 @@
+{
+	"luci-app-usque": {
+		"description": "Grant access to the usque (Cloudflare WARP) configuration and status",
+		"read": {
+			"ubus": {
+				"luci.usque": [
+					"status",
+					"getConfig",
+					"registerStatus",
+					"test",
+					"logs"
+				]
+			},
+			"uci": [
+				"usque"
+			]
+		},
+		"write": {
+			"ubus": {
+				"luci.usque": [
+					"register",
+					"setInitAction",
+					"deleteConfig",
+					"fixConfigPermissions"
+				]
+			},
+			"uci": [
+				"usque"
+			]
+		}
+	}
+}

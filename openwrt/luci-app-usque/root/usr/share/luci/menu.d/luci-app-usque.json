@@ -1,0 +1,15 @@
+{
+	"admin/services/usque": {
+		"title": "usque (Cloudflare WARP)",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "usque/overview"
+		},
+		"depends": {
+			"acl": [
+				"luci-app-usque"
+			]
+		}
+	}
+}
