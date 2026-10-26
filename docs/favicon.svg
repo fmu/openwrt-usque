@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="usque for OpenWrt">
+  <rect width="32" height="32" rx="8" fill="#f6821f"/>
+  <path d="M8 23V13a8 8 0 0 1 16 0v10" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+  <path d="M13 23v-8a3 3 0 0 1 6 0v8" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" opacity=".78"/>
+</svg>
