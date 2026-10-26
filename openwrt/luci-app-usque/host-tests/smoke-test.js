@@ -104,6 +104,7 @@ const initActions = [];
 const rpcCalls = [];
 let statusData = null;
 let registerStatusData = null;
+let getConfigData = { ok: true, exists: true };
 let testData = null;
 let logsData = null;
 
@@ -132,7 +133,7 @@ const rpc = {
 				initActions.push(arguments[0]);
 			return Promise.resolve(
 				method === 'status' ? statusData :
-				method === 'getConfig' ? { ok: true } :
+				method === 'getConfig' ? getConfigData :
 				method === 'registerStatus' ? registerStatusData :
 				method === 'test' ? testData :
 				method === 'logs' ? logsData :
@@ -463,6 +464,27 @@ function assert(cond, msg) {
 	});
 
 	/* --- service buttons --- */
+	await t('handleStart refuses when enabled=0 (init script would no-op)', async function() {
+		statusData = baseStatus({ enabled: false, running: false, pid: 0, uptime: 0, init_enabled: false });
+		v.updateStatus(statusData);
+		const beforeActions = initActions.length;
+		const beforeNotifs = notifications.length;
+		await v.handleStart();
+		assert(initActions.length === beforeActions, 'no init action issued');
+		assert(notifications.length === beforeNotifs + 1, 'warning notification');
+		assert(notifications[notifications.length - 1].cls === 'warning', 'warning class');
+	});
+
+	await t('status note flags enabled-but-not-on-boot', function() {
+		v.updateStatus(baseStatus({ enabled: true, init_enabled: false, running: false, pid: 0 }));
+		assert(/boot/.test(v.elServiceNote.textContent), 'note: ' + v.elServiceNote.textContent);
+	});
+
+	await t('updateStatus keeps the latest status for handlers', function() {
+		v.updateStatus(baseStatus({ config_path: '/tmp/other.json' }));
+		assert(v.status.config_path === '/tmp/other.json', 'this.status updated');
+	});
+
 	await t('handleStart/handleStop/handleRestart call setInitAction', async function() {
 		statusData = baseStatus();
 		await v.handleStart();
@@ -520,6 +542,19 @@ function assert(cond, msg) {
 		await v.handleSaveApply({});
 		const newActions = initActions.slice(before);
 		assert(newActions.indexOf('disable') !== -1 && newActions.indexOf('stop') !== -1, 'disable+stop: ' + newActions.join(','));
+	});
+
+	await t('handleSaveApply does not restart without a WARP config', async function() {
+		uciStore['usque.main.enabled'] = '1';
+		getConfigData = { ok: true, exists: false, valid: false };
+		const before = initActions.length;
+		await v.handleSaveApply({});
+		getConfigData = { ok: true, exists: true };
+		const newActions = initActions.slice(before);
+		assert(newActions.indexOf('enable') !== -1, 'boot symlink still enabled: ' + newActions.join(','));
+		assert(newActions.indexOf('restart') === -1, 'no restart without config');
+		const notif = notifications[notifications.length - 1];
+		assert(notif.cls === 'warning', 'warning notification: ' + notif.cls);
 	});
 
 	await t('handleSaveApply surfaces backend errors', async function() {

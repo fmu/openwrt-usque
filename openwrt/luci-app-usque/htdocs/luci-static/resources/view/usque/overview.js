@@ -228,6 +228,9 @@ return view.extend({
 			return;
 		}
 
+		/* keep the latest state around for the action handlers */
+		this.status = st;
+
 		if (st.ok !== true) {
 			this.elBackend.style.display = '';
 			this.elBackend.textContent = _('Backend error: %s').format(errText(st));
@@ -259,6 +262,12 @@ return view.extend({
 		}
 		else if (!st.init_script) {
 			this.elServiceNote.textContent = _('init script /etc/init.d/usque missing');
+		}
+		else if (enabled && !st.init_enabled) {
+			this.elServiceNote.textContent = _('enabled in the configuration but not enabled on boot \u2014 Save & Apply fixes this');
+		}
+		else if (!enabled) {
+			this.elServiceNote.textContent = _('disabled in the configuration (enabled=0), the service will not start');
 		}
 		else {
 			this.elServiceNote.textContent = '';
@@ -474,10 +483,10 @@ return view.extend({
 		var s = map.section(form.NamedSection, 'main', 'usque', _('Configuration'));
 		var o;
 
-		o = s.option(form.Flag, 'enabled', _('Enable service on boot'));
+		o = s.option(form.Flag, 'enabled', _('Enable usque service'));
 		o.default = '0';
 		o.rmempty = false;
-		o.description = _('Starts usque on boot (/etc/init.d/usque enable). Requires a WARP configuration.');
+		o.description = _('Master switch: the init script only starts usque when this is checked. Save & Apply also updates the boot symlink (/etc/init.d/usque enable) and restarts the service.');
 
 		o = s.option(form.Flag, 'auto_register', _('Auto-register if no configuration exists'));
 		o.default = '1';
@@ -493,14 +502,16 @@ return view.extend({
 		o = s.option(form.Value, 'config_file', _('Configuration file'));
 		o.default = '/etc/usque/warp0.json';
 		o.rmempty = false;
+		o.datatype = 'file';
 		o.placeholder = '/etc/usque/warp0.json';
 		o.description = _('WARP configuration written by the registration (contains the private key, mode 600).');
 
 		o = s.option(form.Value, 'interface', _('Tunnel interface'));
 		o.default = 'warp0';
 		o.rmempty = false;
+		o.datatype = 'maxlength(15)';
 		o.placeholder = 'warp0';
-		o.description = _('Name of the TUN interface created by usque.');
+		o.description = _('Name of the TUN interface created by usque (max. 15 characters, letters, digits, ".", "_", "-").');
 
 		o = s.option(form.Value, 'mtu', _('MTU'));
 		o.default = '1400';
@@ -609,6 +620,12 @@ return view.extend({
 	},
 
 	handleStart: function() {
+		if (this.status && this.status.enabled !== true) {
+			ui.addNotification(_('Service is disabled'), E('p', {},
+				_('usque.main.enabled is 0, so /etc/init.d/usque will not start the tunnel. Enable "Enable usque service" above and press Save & Apply.')), 'warning');
+			return Promise.resolve();
+		}
+
 		return this.doServiceAction('start');
 	},
 
@@ -876,6 +893,17 @@ return view.extend({
 		var self = this;
 		var rawEnabled = uci.get('usque', 'main', 'enabled');
 		var enabled = (rawEnabled != null) ? parseBool(rawEnabled) : null;
+
+		/* ask the backend instead of trusting possibly stale polled state */
+		return L.resolveDefault(callGetConfig(), null).then(function(cfg) {
+			return self.applyServiceStateWithConfig(enabled, !!(cfg && cfg.ok === true && cfg.exists === true));
+		})['catch'](function(err) {
+			ui.addNotification(_('Service control failed'), E('p', {}, err.message || String(err)), 'danger');
+		});
+	},
+
+	applyServiceStateWithConfig: function(enabled, haveConfig) {
+		var self = this;
 		var tasks = [];
 
 		if (enabled === true)
@@ -883,7 +911,15 @@ return view.extend({
 		else if (enabled === false)
 			tasks.push(callSetInitAction('disable'));
 
-		tasks.push(callSetInitAction(enabled === false ? 'stop' : 'restart'));
+		if (enabled === false) {
+			tasks.push(callSetInitAction('stop'));
+		}
+		else if (haveConfig) {
+			tasks.push(callSetInitAction('restart'));
+		}
+		/* enabled but no config: do not start yet, the init script would
+		 * register a device synchronously (blocking this call for up to a
+		 * minute); the registration UI or the next boot handles that. */
 
 		return tasks.reduce(function(chain, task) {
 			return chain.then(function() {
@@ -893,10 +929,15 @@ return view.extend({
 				});
 			});
 		}, Promise.resolve()).then(function() {
-			ui.addNotification(_('Configuration saved'), E('p', {},
-				enabled === false
-					? _('usque was stopped and disabled (enabled=0).')
-					: _('usque was restarted with the new configuration.')), 'success');
+			if (enabled !== false && !haveConfig)
+				ui.addNotification(_('Configuration saved'), E('p', {},
+					_('No WARP configuration yet: use "Generate WARP configuration" first, or let the init script register a device on the next start (auto_register).')), 'warning');
+			else if (enabled === false)
+				ui.addNotification(_('Configuration saved'), E('p', {},
+					_('usque was stopped and disabled (enabled=0).')), 'success');
+			else
+				ui.addNotification(_('Configuration saved'), E('p', {},
+					_('usque was restarted with the new configuration.')), 'success');
 			return self.refresh();
 		}).catch(function(err) {
 			ui.addNotification(_('Service control failed'), E('p', {}, err.message || String(err)), 'danger');

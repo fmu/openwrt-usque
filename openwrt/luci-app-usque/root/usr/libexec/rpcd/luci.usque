@@ -105,9 +105,16 @@ iface_name() {
 	printf '%s' "$i"
 }
 
-service_enabled() {
+# rc.common "enabled": is there an /etc/rc.d/S* symlink (start on boot)?
+service_boot_enabled() {
 	[ -x "$INIT_SCRIPT" ] || { printf '0'; return; }
 	"$INIT_SCRIPT" enabled >/dev/null 2>&1 && printf '1' || printf '0'
+}
+
+# the effective on/off switch: /etc/init.d/usque refuses to start unless
+# usque.main.enabled=1 (see start_service in the init script)
+service_uci_enabled() {
+	bool_val "$(uci_get enabled)"
 }
 
 service_running() {
@@ -257,11 +264,12 @@ add_config_object() {
 # ---------------------------------------------------------------------------
 
 do_status() {
-	local cfg iface enabled running pid uptime mtu exists valid secure
+	local cfg iface enabled boot_enabled running pid uptime mtu exists valid secure
 
 	cfg="$(config_path)"
 	iface="$(iface_name)"
-	enabled="$(service_enabled)"
+	enabled="$(service_uci_enabled)"
+	boot_enabled="$(service_boot_enabled)"
 	running="$(service_running)"
 	pid="$(tunnel_pid)"
 	uptime="$(proc_uptime "$pid")"
@@ -280,6 +288,7 @@ do_status() {
 	json_add_bool installed "$([ -x "$USQUE_BIN" ] && printf 1 || printf 0)"
 	json_add_bool init_script "$([ -x "$INIT_SCRIPT" ] && printf 1 || printf 0)"
 	json_add_bool enabled "$enabled"
+	json_add_bool init_enabled "$boot_enabled"
 	json_add_bool running "$running"
 	json_add_int pid "${pid:-0}"
 	json_add_int uptime "${uptime:-0}"

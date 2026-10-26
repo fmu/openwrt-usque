@@ -209,7 +209,11 @@ J
 )
 echo "$r" | grep -q '"ok": true' && check "setInitAction restart ok" 0 || check "setInitAction restart ok" 1 "$r"
 s=$(sh "$T/luci.usque" call status </dev/null)
-echo "$s" | grep -q '"enabled": true' && check "status: enabled=true" 0 || check "status: enabled=true" 1 "$s"
+# usque.main.enabled comes from UCI (absent in this test env -> false); the
+# /etc/rc.d boot symlink is reported separately as init_enabled
+echo "$s" | grep -q '"enabled": false' && check "status: enabled follows UCI flag" 0 || check "status: enabled follows UCI flag" 1 "$s"
+echo "$s" | grep -q '"init_enabled": true' && check "status: init_enabled=true after enable" 0 || check "status: init_enabled=true after enable" 1 "$s"
+echo "$s" | grep -q '"running": true' && check "status: running=true after restart" 0 || check "status: running=true after restart" 1 "$s"
 r=$(sh "$T/luci.usque" call setInitAction <<'J'
 {"action":"bogus"}
 J
