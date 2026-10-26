@@ -9,6 +9,11 @@
 <meta name="theme-color" content="#faf9f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e0f11" media="(prefers-color-scheme: dark)">
 <meta name="robots" content="index, follow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="usque for OpenWrt">
+<meta property="og:title" content="usque for OpenWrt — Cloudflare WARP (MASQUE) tunnel with LuCI">
+<meta property="og:description" content="Install Cloudflare WARP on OpenWrt 25.12 from a signed apk feed, generate a WARP identity with one click in LuCI, and route your network through a MASQUE/Connect-IP tunnel.">
+<meta name="twitter:card" content="summary">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -182,6 +187,22 @@
           </tbody>
         </table>
       </div>
+
+      <h3 id="preflight">Before you start</h3>
+      <p>Three quick checks tell you whether the packages will install and run:</p>
+      <figure class="cmd">
+        <pre><code># release + architecture (expect 25.12.x / arm_cortex-a7_neon-vfpv4)
+grep -E '^(DISTRIB_RELEASE|DISTRIB_ARCH)=' /etc/openwrt_release
+
+# free space in the overlay (want ~3 MB or more)
+df -h /overlay
+
+# TUN support (kmod-tun is installed as a dependency, but check the kernel module)
+lsmod | grep tun</code></pre>
+      </figure>
+      <p class="fineprint">If <code>lsmod</code> prints nothing, the module is not loaded yet —
+      installing the package pulls in <code>kmod-tun</code>. If your image has no TUN support at all,
+      the tunnel cannot start; use a standard OpenWrt image.</p>
     </div>
   </section>
 
