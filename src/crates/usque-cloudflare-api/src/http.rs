@@ -432,6 +432,9 @@ mod tests {
     async fn read_canned_response(response: &[u8]) -> (u16, Vec<u8>) {
         let (client, mut server) = tokio::io::duplex(64 * 1024);
         server.write_all(response).await.unwrap();
+        // Close the write half: the EOF-framed response path needs it, and it
+        // keeps the other tests from blocking on a live in-memory peer.
+        drop(server);
         let mut conn = Conn::new(client);
         let head = conn.read_head().await.unwrap();
         let head = parse_head(&head).unwrap();

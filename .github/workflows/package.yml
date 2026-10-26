@@ -136,10 +136,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # /bin/true is an ELF binary; the package build only checks the ELF
-          # magic, and the feed verification installs it into a throw-away root.
-          cp /bin/true dist/usque
+          # A *static* stub: OpenWrt's CheckDependencies rejects dynamically
+          # linked binaries that need libc.so.6 (the real usque binary is static).
+          cat > /tmp/usque-stub.c <<'EOF'
+          int main(void) { return 0; }
+          EOF
+          if ! gcc -static -O2 -o dist/usque /tmp/usque-stub.c; then
+            echo "::warning::static stub build failed, falling back to /bin/true"
+            cp /bin/true dist/usque
+          fi
           chmod 0755 dist/usque
+          file dist/usque || true
           echo "::warning::using a placeholder binary (packaging smoke test) - artifact is apk-feed-dummy"
           ls -l dist/usque
 

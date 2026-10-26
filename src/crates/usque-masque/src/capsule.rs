@@ -128,6 +128,7 @@ impl CapsuleReader {
 
     /// Drops fully-consumed leading chunks. O(1) amortized: called
     /// periodically rather than per capsule.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn compact(&mut self) {
         while let Some(first) = self.chunks.first() {
             if self.start_in_first >= first.len() {
@@ -141,6 +142,7 @@ impl CapsuleReader {
 
     /// Number of stored body chunks. Used by callers to decide when
     /// to call `compact`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }

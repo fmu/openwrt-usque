@@ -43,16 +43,6 @@ pub struct ConnectIpSession {
 }
 
 impl ConnectIpSession {
-    pub(crate) fn new(transport: Transport) -> Self {
-        Self::with_capacity(
-            Arc::new(Mutex::new(VecDeque::new())),
-            Arc::new(Notify::new()),
-            transport,
-            Arc::new(AtomicBool::new(false)),
-            1500,
-        )
-    }
-
     pub(crate) fn with_capacity(
         incoming: Arc<Mutex<VecDeque<Bytes>>>,
         notify: Arc<Notify>,
