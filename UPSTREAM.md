@@ -10,4 +10,4 @@ This repository vendors and patches [FireMasterK/usque-rs](https://github.com/Fi
 | License | MIT (see `src/LICENSE.md`) |
 
 Changes applied for the OpenWrt port live in `src/` directly and are documented in
-[`docs/PATCHES.md`](docs/PATCHES.md).
+[`build/PATCHES.md`](build/PATCHES.md).
