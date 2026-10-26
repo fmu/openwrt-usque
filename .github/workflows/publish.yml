@@ -1,10 +1,20 @@
 name: Publish site
 
-# Publishes the GitHub Pages site (docs) and, once the package pipeline is
-# wired in, the signed apk feed. This initial version only publishes the docs
-# and the public signing key; the feed job is added by the Lead after the
-# binary/package workflows are green.
+# Publishes https://fmu.github.io/openwrt-usque/:
+#   /                    docs/ (static site)
+#   /feed/packages.adb   signed apk repository index
+#   /feed/usque-*.apk         packages
+#   /feed/luci-app-usque-*.apk
+#   /feed/usque.pem      public signing key
+#
+# Feed artifacts come from the "Package feed" workflow (artifact `apk-feed`).
+# A successful package run triggers this workflow directly; docs-only pushes
+# fall back to the newest successful push-event package run so the live feed is
+# never dropped from the deployment.
 on:
+  workflow_run:
+    workflows: ["Package feed"]
+    types: [completed]
   push:
     branches: [main]
     paths:
@@ -15,6 +25,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -22,8 +33,12 @@ concurrency:
   group: pages
   cancel-in-progress: false
 
+env:
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
   deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -32,7 +47,39 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Fetch signed feed artifact
+        id: feed
+        run: |
+          set -euo pipefail
+          mkdir -p feed
+          run_id=""
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            run_id="${{ github.event.workflow_run.id }}"
+          else
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" \
+              --workflow package.yml --event push --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId // empty' || true)"
+          fi
+          if [ -n "$run_id" ]; then
+            echo "Downloading apk-feed from run $run_id"
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" -n apk-feed -D feed; then
+              :
+            else
+              echo "No apk-feed artifact in run $run_id"
+            fi
+          else
+            echo "No successful package run found"
+          fi
+          if [ -f feed/packages.adb ] && ls feed/*.apk >/dev/null 2>&1; then
+            ls -l feed
+            echo "have_feed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_feed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::feed artifact unavailable; refusing to deploy a site without the package feed"
+          fi
+
       - name: Assemble site
+        if: steps.feed.outputs.have_feed == 'true'
         run: |
           set -euo pipefail
           rm -rf site
@@ -41,17 +88,19 @@ jobs:
           if [ ! -f site/index.html ]; then
             printf '<!doctype html><title>usque for OpenWrt</title><p>Site build in progress.</p>\n' > site/index.html
           fi
+          cp feed/*.apk feed/packages.adb site/feed/
+          [ -f feed/index.json ] && cp feed/index.json site/feed/ || true
           cp keys/usque.pem site/feed/usque.pem
-          # GitHub Pages runs Jekyll by default; disable it so filenames are
-          # served verbatim (the deploy-pages artifact bypasses Jekyll anyway).
           touch site/.nojekyll
-          find site -maxdepth 3 -type f | sort
+          find site -maxdepth 2 -type f | sort
 
       - name: Upload Pages artifact
+        if: steps.feed.outputs.have_feed == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
       - name: Deploy to GitHub Pages
         id: deployment
+        if: steps.feed.outputs.have_feed == 'true'
         uses: actions/deploy-pages@v4
