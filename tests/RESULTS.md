@@ -153,7 +153,17 @@ Run: `tests/phase1.sh` with `USQUE_BIN=dist/usque` (fixed binary, locally cross-
 from builder's tree with `build/build-usque.sh` + zig 0.17.0/cargo-zigbuild; the CI artifact
 `usque-armv7-musl` can be dropped in `tests/artifacts/build/` and the same command is used).
 
-Artifact: **2,912,344 bytes (2.8 MiB)**, sha256 `a3c91f661f93e0fd2fd24cb4cab287834911a5562c51af507323d04c48eecd8c`.
+Artifacts validated (all green, same behaviour):
+
+| Artifact | Size | sha256 | Notes |
+| --- | --- | --- | --- |
+| local cross-build (builder tree 17:31) | 2,912,344 B | `a3c91f66…` | first proof of the ring/DER fix |
+| CI run 40361577938 (cfbd6aa) | 2,898,952 B | `492b89b3…` | h2 removed; official acceptance run |
+| CI run 40366592592 (9e6eac2) | 2,902,152 B | `7c1c5f69…` | **current**; adds `--authority`/`--protocol`; egress `<WARP_EGRESS_IP>`, `warp=on` |
+
+Latest run (`PHASE1_ALLOW_DEFAULT_ROUTE=1`): MASQUE over UDP/443 in 1 s, first trace attempt
+`warp=on` (egress `<WARP_EGRESS_IP>`, `colo=VIE`), MTU 1400, v4+v6 tun addresses, HTTPS 200, DNS
+ok, RSS 6,768 kB, clean revert (`warp=off`, WAN default restored, `warp9` gone).
 Log: [`tests/artifacts/phase1-rust-local.log`](artifacts/phase1-rust-local.log) (gitignored),
 summary [`tests/artifacts/phase1-summary.txt`](artifacts/phase1-summary.txt),
 CLI [`tests/artifacts/usque-help.txt`](artifacts/usque-help.txt) (captured for the docs).
