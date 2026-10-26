@@ -252,6 +252,61 @@ const view = {
 
 /* ---------- load module ---------- */
 const src = fs.readFileSync(viewPath, 'utf8');
+
+/*
+ * LuCI's module loader scans the module source and only treats the leading
+ * string literals as dependency declarations ("require <name>" / "use strict");
+ * any other string literal before them silently stops the scanning, which would
+ * leave the module body with undefined variables. Replicating that loop here
+ * guards against accidentally breaking the contract.
+ */
+function parseLuCIRequires(source) {
+	const requirematch = /^require[ \t]+(\S+)(?:[ \t]+as[ \t]+([a-zA-Z_]\S*))?$/;
+	const strictmatch = /^use[ \t]+strict$/;
+	const depends = [];
+	let off = -1, prev = -1, quote = -1, comment = -1, esc = false;
+
+	for (let i = 0; i < source.length; i++) {
+		const chr = source.charCodeAt(i);
+
+		if (esc) {
+			esc = false;
+		}
+		else if (comment != -1) {
+			if ((comment == 47 && chr == 10) || (comment == 42 && prev == 42 && chr == 47))
+				comment = -1;
+		}
+		else if ((chr == 42 || chr == 47) && prev == 47) {
+			comment = chr;
+		}
+		else if (chr == 92) {
+			esc = true;
+		}
+		else if (chr == quote) {
+			const str = source.substring(off, i);
+			const m = requirematch.exec(str);
+
+			if (m)
+				depends.push(m[1]);
+			else if (!strictmatch.exec(str))
+				break;
+
+			off = -1;
+			quote = -1;
+		}
+		else if (quote == -1 && (chr == 34 || chr == 39)) {
+			off = i + 1;
+			quote = chr;
+		}
+
+		prev = chr;
+	}
+
+	return depends;
+}
+
+const EXPECTED_REQUIRES = [ 'view', 'form', 'rpc', 'poll', 'ui', 'uci', 'dom' ];
+const REQUIRES = parseLuCIRequires(src);
 const factory = new Function(
 	'window', 'document', 'L', 'view', 'form', 'rpc', 'poll', 'ui', 'uci', 'dom',
 	src + '\n'
@@ -315,7 +370,13 @@ function assert(cond, msg) {
 
 	const v = factory(global.window, global.document, global.L, view, form, rpc, poll, ui, uci, dom);
 
+	await t('module header parses as LuCI require list', function() {
+		assert(JSON.stringify(REQUIRES) === JSON.stringify(EXPECTED_REQUIRES),
+			'requires: ' + JSON.stringify(REQUIRES));
+	});
+
 	await t('module returns a view object with load/render', function() {
+		assert(typeof v === 'object' && v !== null, 'factory returned an object');
 		assert(typeof v.load === 'function', 'load() present');
 		assert(typeof v.render === 'function', 'render() present');
 		assert(typeof v.handleSaveApply === 'function', 'handleSaveApply() present');

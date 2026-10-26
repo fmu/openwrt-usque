@@ -509,7 +509,7 @@ return view.extend({
 		o = s.option(form.Value, 'interface', _('Tunnel interface'));
 		o.default = 'warp0';
 		o.rmempty = false;
-		o.datatype = 'maxlength(15)';
+		o.datatype = 'netdevname';
 		o.placeholder = 'warp0';
 		o.description = _('Name of the TUN interface created by usque (max. 15 characters, letters, digits, ".", "_", "-").');
 
