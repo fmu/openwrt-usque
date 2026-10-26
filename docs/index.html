@@ -19,12 +19,11 @@
 </head>
 <body>
 <!--
-  v2 draft notes (remove/extend once the 0.2.x packages are final):
-  - default connection section name assumed to be "warp0"; uci examples use usque.warp0.*
-  - metric default assumed 0; global lan_ipv6/lan_ipv6_prefix section placement not yet fixed
-  - LuCI labels for the new routing toggles are described, not quoted
-  - version shown as 0.2.0-r1 pending packager PKG_VERSION/PKG_RELEASE confirmation
-  - installed/download sizes still placeholders ("about 3 MB" / "under 3 MB")
+  v2 draft notes (remove once the 0.2.x artifacts are final):
+  - installed/download sizes are still placeholders ("about 3 MB" / "under 3 MB")
+  - version/footer shows 0.2.0-r1, matching PKG_VERSION 0.2.0 + PKG_RELEASE 1 in openwrt/usque
+  - UCI/behaviour text follows openwrt/usque v2 (init + hook + firewall + lan_ipv6) and the
+    LuCI labels in openwrt/luci-app-usque; re-check if the UI changes before release
 -->
 <a class="skip-link" href="#main">Skip to content</a>
 
@@ -62,8 +61,8 @@
         <strong>usque</strong> is a small Rust client for Cloudflare WARP built on MASQUE&nbsp;/&nbsp;Connect-IP
         (HTTP/3). This project packages it for <strong>OpenWrt 25.12</strong> with a <strong>LuCI app</strong>,
         a procd service and a signed <code>apk</code> feed. It connects in TUN mode and — unlike the
-        first release — <strong>does not touch your routing until you opt in</strong>: each connection
-        decides whether traffic should use the tunnel.
+        first release — <strong>leaves your routing alone until you opt in</strong>: each connection
+        decides whether IPv4 traffic should use the tunnel, and existing IPv6 routing is respected.
       </p>
       <ul class="pills" aria-label="Project facts">
         <li>OpenWrt 25.12 · apk</li>
@@ -98,11 +97,16 @@
       </p>
 
       <div class="callout ok">
-        <p><strong>Safe by default: no route takeover.</strong> Installing and starting usque creates
-        the tunnel but leaves your default routes, <code>ip</code> rules, DNS and firewall forwarding
-        alone. Traffic uses the tunnel only when you enable <em>Default route</em> for a connection,
-        add your own routes, or turn on the IPv6 routing / LAN IPv6 options. This is a deliberate
-        change from v0.1, where every connection installed a default route immediately.</p>
+        <p><strong>Safe by default: no IPv4 route takeover.</strong> Installing and starting usque
+        creates the tunnel but leaves your IPv4 routing, <code>ip</code> rules, DNS and firewall
+        forwarding alone. IPv4 traffic uses the tunnel only when you enable <em>Default route</em> for
+        a connection or add your own routes. This is a deliberate change from v0.1, where every
+        connection installed a default route immediately.</p>
+        <p><strong>The one default routing change is IPv6:</strong> with
+        <code>ipv6_route=auto</code> (default) a tunnel IPv6 default route is installed only when the
+        router has <em>no</em> native IPv6 default route — that is how IPv4-only/CGNAT WANs get IPv6.
+        Existing IPv6 routing is never replaced; set <code>ipv6_route='off'</code> (or
+        <code>ipv6='0'</code>) if you want no IPv6 routing changes at all.</p>
       </div>
 
       <div class="grid">
@@ -117,9 +121,10 @@
           once, and a config file such as <code>/etc/usque/warp0.json</code> is created.</p>
         </article>
         <article class="card">
-          <h3>Routing is opt-in</h3>
+          <h3>IPv4 routing is opt-in</h3>
           <p>Each connection has its own <em>Default route</em> switch, off by default. Enable it for a
-          classic full tunnel, or leave it off and route selected prefixes yourself.</p>
+          classic full tunnel, or leave it off and route selected prefixes yourself. IPv6 is handled
+          separately by <code>ipv6_route</code>.</p>
         </article>
         <article class="card">
           <h3>Multiple connections</h3>
@@ -129,8 +134,8 @@
         <article class="card">
           <h3>IPv6, even on IPv4-only WANs</h3>
           <p>The tunnel gets IPv6 by default; <code>ipv6_route=auto</code> adds an IPv6 default route
-          only when the router does not have one. A separate LAN option can hand a ULA /64 to your
-          devices via NAT66.</p>
+          only when the router does not have a native one. A separate LAN option can hand a ULA prefix
+          to your devices via NAT66.</p>
         </article>
         <article class="card">
           <h3>Cloudflare or custom endpoints</h3>
@@ -158,8 +163,10 @@
             <li>Router WAN</li>
             <li>The internet <span class="flow-sub">exactly as before</span></li>
           </ol>
-          <p class="fineprint">The tunnel interface exists and is up, but no default route, policy
-          rule or DNS change is installed — nothing is sent through it.</p>
+          <p class="fineprint">The tunnel interface exists and is up, but no IPv4 default route, IPv4
+          policy rule or DNS change is installed — nothing is IPv4-routed through it. Exception: on a
+          WAN without native IPv6 the tunnel may already provide an IPv6 default route
+          (<code>ipv6_route=auto</code>).</p>
         </div>
         <div class="flow-block">
           <h4>Opt-in: Default route enabled</h4>
@@ -224,8 +231,9 @@
               <th scope="row">LAN IPv6 (optional)</th>
               <td>Only if you enable <code>lan_ipv6</code>: the default OpenWrt image's
               <code>odhcpd</code> (RA/DHCPv6) and firewall/NAT66 support are used. Hands out a
-              <em>local</em> ULA /64 to LAN devices and NATs it through the tunnel — not a globally
-              routed prefix.</td>
+              <em>local</em> ULA prefix to LAN devices and NATs it through the tunnel — not a globally
+              routed prefix. Requires an enabled connection with IPv6 on and
+              <code>ipv6_route=auto</code> or <code>always</code>.</td>
             </tr>
             <tr>
               <th scope="row">Shell access</th>
@@ -403,13 +411,16 @@ apk update</code></pre>
         <li>
           <h4>Open Services → usque</h4>
           <p>In the LuCI menu under <strong>Services</strong>, pick <strong>usque (Cloudflare
-          WARP)</strong>. You will see a <strong>connection list</strong> — initially one connection
-          named <code>warp0</code> — plus service controls, routing switches and diagnostics. Each
-          connection is an independent tunnel with its own interface and config file.</p>
+          WARP)</strong>. The page shows a <strong>Connections</strong> table — initially one
+          connection named <code>warp0</code> — with its enabled checkbox, interface, mode, IPv4/IPv6
+          routing status and per-connection actions (Start / Stop / Restart / Test / Logs / Remove).
+          Below it are the selected connection's settings, the WARP account / configuration file
+          section, <em>Global settings</em> and diagnostics. Each connection is an independent tunnel
+          with its own interface and config file.</p>
         </li>
         <li>
           <h4>Generate a WARP configuration for the connection</h4>
-          <p>For the default connection, the <em>WARP account</em> card asks you to create an identity.
+          <p>For the default connection, the <em>Account / configuration file</em> section asks you to create an identity.
           Enter an optional device name (it shows up in your Cloudflare WARP device list), tick the box
           accepting Cloudflare's terms, and click <strong>Generate WARP configuration</strong>.</p>
           <p>Under the hood this runs, for that connection's config file:</p>
@@ -428,14 +439,15 @@ apk update</code></pre>
         </li>
         <li>
           <h4>Enable and start</h4>
-          <p>Turn on <strong>Enable usque service</strong> (stored as the connection's
-          <code>enabled</code> option), click <strong>Save &amp; Apply</strong>, then press
-          <strong>Start</strong>. The status card should switch to <em>running</em> within a few
+          <p>Tick <strong>Enabled</strong> for the connection (stored as its <code>enabled</code>
+          option), click <strong>Save &amp; Apply</strong>, then press the connection's
+          <strong>Start</strong> action. The state should switch to <em>running</em> within a few
           seconds, and the connection's interface (<code>warp0</code>) appears with its tunnel
           address.</p>
           <p class="fineprint">The init script only starts connections whose <code>enabled</code>
-          option is set: if you press Start while it is disabled, nothing happens and the app tells you
-          to enable it first. The same applies to <code>/etc/init.d/usque start</code>.</p>
+          option is set: pressing Start on a disabled connection tells you to enable it and Save &amp;
+          Apply first. The same applies to <code>/etc/init.d/usque start</code>. If no connection is
+          enabled at all, Save &amp; Apply stops and disables the service.</p>
         </li>
         <li>
           <h4>Verify the tunnel</h4>
@@ -444,20 +456,27 @@ apk update</code></pre>
           <figure class="cmd">
             <pre><code>wget -qO- https://www.cloudflare.com/cdn-cgi/trace | grep -E '^(ip|loc|colo|warp)='</code></pre>
           </figure>
-          <p>With routing still off, this reports <code>warp=off</code> — <strong>that is expected</strong>:
-          the tunnel is up but nothing is routed into it yet. Continue with the next step.</p>
+          <p>With IPv4 routing still off, this reports <code>warp=off</code> — <strong>that is
+          expected</strong>: the tunnel is up but no IPv4 traffic is routed into it yet. (On a WAN
+          without native IPv6 the tunnel may already provide IPv6, because of
+          <code>ipv6_route=auto</code>; see <a href="#routing">Routing</a>.) The connection table
+          labels this state <em>IPv4: not routed</em>; <em>IPv4 route pending</em> means the option was
+          saved but the connection has not been restarted yet.</p>
         </li>
         <li>
           <h4>Choose whether traffic uses the tunnel</h4>
           <p>Open the connection's settings. The routing switches are off/unset by default:</p>
           <ul class="bullets">
             <li><strong>Default route</strong> (off): send all IPv4 traffic through the tunnel — the
-            classic full-tunnel mode.</li>
+            classic full-tunnel mode. <strong>Default route metric</strong> sets the route metric
+            (lower wins).</li>
             <li><strong>IPv6 route</strong> (<code>auto</code>): install an IPv6 default route only if
-            the router has no IPv6 default route yet. <code>always</code> installs it regardless;
-            <code>off</code> never does.</li>
-            <li><strong>LAN IPv6</strong> (off): global switch that hands LAN devices a ULA /64 and
-            NAT66s it through the tunnel.</li>
+            the router has no native/WAN IPv6 default route yet. <code>always</code> installs it
+            regardless; <code>off</code> never does.</li>
+            <li><strong>Enable IPv6 on this tunnel</strong> (on): the tunnel's own IPv6 address.</li>
+            <li><strong>Global settings → Provide IPv6 to LAN hosts (NAT66 through the tunnel)</strong>
+            (off) and <strong>LAN IPv6 prefix</strong>: give LAN devices IPv6 via ULA + router
+            advertisements, NAT66ed through the tunnel.</li>
           </ul>
           <p>Save &amp; Apply (which restarts the connection), then re-run the check above. With
           <em>Default route</em> on it should now report <code>warp=on</code> and a Cloudflare egress
@@ -481,10 +500,12 @@ apk update</code></pre>
       network, so there are no surprises.</p>
 
       <div class="callout ok">
-        <p><strong>Defaults change nothing.</strong> A fresh install with defaults installs no default
-        route, no <code>ip rule</code> and no DNS change. The tunnel interface is created, the firewall
-        zone and forwardings are prepared, and the daemon waits — the router keeps routing exactly as
-        it did before. Stop or disable always removes everything usque added.</p>
+        <p><strong>Defaults change no IPv4 routing.</strong> A fresh install installs no IPv4 default
+        route, no <code>ip rule</code> for IPv4 and no DNS change. The tunnel interface is created, the
+        firewall zone and forwardings are prepared and the daemon waits — IPv4 keeps routing exactly
+        as before. The only default routing change is IPv6: when the router has no native IPv6 default
+        route, <code>ipv6_route=auto</code> installs a tunnel IPv6 default route (plus its IPv6 policy
+        rule) so IPv6 works on IPv4-only WANs. Stop or disable removes everything usque added.</p>
       </div>
 
       <h3>Routing options</h3>
@@ -511,53 +532,70 @@ apk update</code></pre>
             <tr>
               <th scope="row"><code>ipv6</code> <span class="fineprint">(per connection)</span></th>
               <td><code>1</code> (on)</td>
-              <td>Gives the tunnel an IPv6 address. Set to <code>0</code> to keep the tunnel IPv4-only
-              and skip all IPv6 routing for that connection.</td>
+              <td>Gives the tunnel its IPv6 address (with <code>0</code> the daemon runs with
+              <code>--no-tunnel-ipv6</code> and IPv6 routing is skipped for this connection). This is
+              the <em>tunnel's</em> IPv6; reaching the endpoint over IPv6 is the separate
+              <code>endpoint_ipv6</code> option.</td>
+            </tr>
+            <tr>
+              <th scope="row"><code>endpoint_ipv6</code> <span class="fineprint">(per connection)</span></th>
+              <td><code>0</code> (off)</td>
+              <td>Connect to the MASQUE endpoint over IPv6 (<code>--ipv6</code>) — only for native-v6 or
+              v6-only networks. Not exposed in the LuCI form; set it with <code>uci</code>.</td>
             </tr>
             <tr>
               <th scope="row"><code>ipv6_route</code> <span class="fineprint">(per connection)</span></th>
               <td><code>auto</code></td>
               <td><code>auto</code>: install an IPv6 default route via the tunnel only if the router
-              has <strong>no</strong> existing IPv6 default route (so IPv4-only/CGNAT WANs get IPv6,
-              native IPv6 is left untouched). <code>always</code>: install it regardless — this can
-              override a native IPv6 uplink. <code>off</code>: never install one.</td>
+              has <strong>no native/WAN IPv6 default route</strong> (so IPv4-only/CGNAT WANs get
+              IPv6). A default route installed by another usque connection does not count as native.
+              <code>always</code>: install it regardless — this can override a native IPv6 uplink.
+              <code>off</code>: never install one.</td>
             </tr>
             <tr>
               <th scope="row"><code>lan_ipv6</code> <span class="fineprint">(global)</span></th>
               <td><code>0</code> (off)</td>
-              <td>Announces a ULA /64 on the LAN (router advertisements) and NAT66s it through the
-              tunnel, so LAN devices get IPv6 on an IPv4-only WAN. Local ULA only — devices are not
-              globally reachable. Off by default; see <a href="#lan-ipv6">LAN IPv6</a>.</td>
+              <td>Gives LAN clients IPv6 through the tunnel (ULA + router advertisements + NAT66), so
+              they work on an IPv4-only WAN. It only takes effect when a connection with IPv6 enabled
+              provides the IPv6 default route (<code>ipv6_route=auto</code> or <code>always</code>).
+              The helper fills in missing settings only (<code>network.globals.ula_prefix</code>,
+              LAN <code>ip6assign</code>, <code>dhcp.lan.ra</code>) and never replaces existing
+              configuration. Local ULA only — devices are not globally reachable. Off by default; see
+              <a href="#lan-ipv6">LAN IPv6</a>.</td>
             </tr>
             <tr>
               <th scope="row"><code>lan_ipv6_prefix</code> <span class="fineprint">(global)</span></th>
               <td><em>empty</em></td>
-              <td>ULA /64 announced when <code>lan_ipv6</code> is on. Leave empty to use the derived
-              default prefix; set it if you already use a ULA range.</td>
+              <td>ULA prefix to use (<code>/48</code> or <code>/64</code>) when <code>lan_ipv6</code>
+              is on. Empty = derive one from the LAN MAC address; set it if you already use a ULA
+              range.</td>
             </tr>
             <tr>
               <th scope="row">Firewall zone</th>
-              <td>always prepared</td>
-              <td>A dedicated <code>usque</code> zone on the tunnel device (<em>input REJECT, output
-              ACCEPT, forward REJECT</em>) with masquerading (IPv4 + IPv6) and MSS/MTU fixing, plus
-              forwarding into it from every internal zone that forwards to <code>wan</code> (always
-              <code>lan</code>, and e.g. <code>guest</code>). Preparing the zone does not redirect
-              traffic; the <code>wan</code> zone is never modified.</td>
+              <td>on service start</td>
+              <td>When the service starts, a dedicated <code>usque</code> zone is created/updated for
+              <strong>all enabled tunnel interfaces</strong> (<em>input REJECT, output ACCEPT, forward
+              REJECT</em>) with masquerading (IPv4 + IPv6) and MSS/MTU fixing, plus forwarding into it
+              from every internal zone that forwards to <code>wan</code> (always <code>lan</code>, and
+              e.g. <code>guest</code>). Preparing the zone does not redirect traffic; the
+              <code>wan</code> zone is never modified. The zone stays configured when the service is
+              stopped and is removed on uninstall.</td>
             </tr>
             <tr>
               <th scope="row">Endpoint bypass</th>
               <td>when routing is on</td>
-              <td>A host route to the WARP endpoint via the current WAN, installed before any default
-              route so tunnel packets can reach Cloudflare. Only needed — and only installed — when
-              usque actually installs routes.</td>
+              <td>A host route to the endpoint via the current WAN for the address family whose
+              default route is being installed, so tunnel packets can reach the endpoint. Only needed
+              — and only installed — when usque actually installs a route for that family.</td>
             </tr>
             <tr>
               <th scope="row">Policy rule</th>
               <td>when routing is on</td>
-              <td><code>ip rule priority 1000 from all lookup main</code> (plus the IPv6 equivalent
-              when an IPv6 route is installed) so mwan3-style fwmark rules cannot divert traffic away
-              from the main table. Installed only when <code>default_route</code> is on or an IPv6
-              route is installed; with defaults, mwan3 is untouched. Removed on stop.</td>
+              <td><code>ip rule priority 1000 from all lookup main</code>, per address family whose
+              default route is installed, so mwan3-style fwmark rules cannot divert traffic away from
+              the main table. With defaults no rule is installed and mwan3 is untouched. Ownership is
+              ref-counted across connections: the rule is removed when the last routing connection
+              stops.</td>
             </tr>
             <tr>
               <th scope="row">DNS</th>
@@ -569,9 +607,10 @@ apk update</code></pre>
             <tr>
               <th scope="row">Stop / disable</th>
               <td>—</td>
-              <td>Removes the tunnel routes, endpoint bypass and policy rules, then restores the saved
-              WAN default route if none is left. Your WAN routing and LAN access to the router keep
-              working throughout.</td>
+              <td>Removes the tunnel route, endpoint bypass and policy rules for that connection. The
+              WAN default route was saved once, shared by all routing connections, and is restored when
+              the last of them stops. Your WAN routing and LAN access to the router keep working
+              throughout.</td>
             </tr>
           </tbody>
         </table>
@@ -626,18 +665,21 @@ ip route show | grep warp0</code></pre>
 
       <h3 id="lan-ipv6">LAN IPv6 (ULA + NAT66)</h3>
       <p>On an IPv4-only WAN (common with CGNAT, tethering or DS-Lite), LAN devices have no IPv6. With
-      <code>lan_ipv6=1</code> usque announces a <strong>unique local /64</strong> on the LAN via router
-      advertisements and NAT66s it through the tunnel, so devices get working IPv6 to the internet.</p>
+      <code>lan_ipv6=1</code> (global setting) usque gives the LAN a <strong>unique local address
+      prefix</strong>, announces it via router advertisements and NAT66s it through the tunnel, so
+      devices get working IPv6 to the internet. It only takes effect when a connection with IPv6
+      enabled provides the IPv6 default route (<code>ipv6_route=auto</code> or
+      <code>always</code>).</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr><th scope="col">Aspect</th><th scope="col">Details</th></tr>
           </thead>
           <tbody>
-            <tr><th scope="row">Requires</th><td>odhcpd (default OpenWrt image), a tunnel that supports IPv6, and a free firewall/NAT66 path. The prefix is local/ULA — devices are <em>not</em> globally reachable.</td></tr>
-            <tr><th scope="row">Prefix</th><td><code>lan_ipv6_prefix</code> if you set one; otherwise a ULA /64 is derived automatically. Existing static IPv6 assignments on the LAN can conflict — use a matching prefix.</td></tr>
-            <tr><th scope="row">Side effects</th><td>Router advertisements are sent on the LAN; NAT66 prevents inbound IPv6 connections; any existing ULA/RA/DHCPv6 setup should be reviewed before enabling. Turn it off if you already have native IPv6 on the LAN.</td></tr>
-            <tr><th scope="row">Disable</th><td>Set <code>lan_ipv6='0'</code> and restart the service; the advertisements stop and routes are withdrawn.</td></tr>
+            <tr><th scope="row">Requires</th><td>odhcpd (default OpenWrt image) and an enabled connection with IPv6 on and <code>ipv6_route=auto</code> or <code>always</code>, so the tunnel provides the IPv6 default route. The prefix is local/ULA — devices are <em>not</em> globally reachable.</td></tr>
+            <tr><th scope="row">What it sets</th><td>Only missing settings are filled in: <code>network.globals.ula_prefix</code> (derived from the LAN MAC unless <code>lan_ipv6_prefix</code> is set), an IPv6 prefix on the LAN (<code>ip6assign=60</code> if neither <code>ip6assign</code> nor <code>ip6addr</code> exists), and the RA/DHCPv6 server (<code>dhcp.lan.ra=server</code>, <code>dhcpv6=server</code>). Existing configuration is never replaced.</td></tr>
+            <tr><th scope="row">NAT66</th><td>The <code>usque</code> firewall zone already has <code>masq6=1</code>, so LAN IPv6 is NATed through the tunnel. Inbound IPv6 connections do not work.</td></tr>
+            <tr><th scope="row">Disable</th><td>Set <code>lan_ipv6='0'</code> and restart the service. This is intentionally non-destructive: the generated network/dhcp settings stay in place. Remove <code>network.globals.ula_prefix</code>, <code>network.lan.ip6assign</code> / <code>ip6addr</code> and <code>dhcp.lan.ra</code> manually to fully revert.</td></tr>
           </tbody>
         </table>
       </div>
@@ -686,11 +728,15 @@ ip route show | grep warp0</code></pre>
       </div>
 
       <h3>Managing connections in LuCI</h3>
-      <p>The app shows the connection list with each connection's mode, interface and state, plus
-      add/remove actions. Per connection you can set the mode, config file, interface name, MTU,
-      endpoint port and the routing options; Cloudflare connections also have the WARP account card
-      (generate / re-register / delete configuration). Starting the service brings up every enabled
-      connection.</p>
+      <p>The connection table lists every connection with its mode, interface, IPv4/IPv6 routing
+      state and per-connection actions (Start / Stop / Restart / Test / Logs / Remove). Selecting a
+      connection shows its settings: mode, config file, interface name, MTU, endpoint port, the
+      routing switches and (Cloudflare mode) the account card with generate / re-register / delete
+      configuration. Each enabled connection runs as its own procd instance; starting the service
+      starts all of them.</p>
+      <p class="fineprint">Removing a connection stops it and deletes its UCI section but keeps its
+      config file on disk — delete the file separately if you also want to drop the WARP
+      registration.</p>
 
       <h3>Connection example</h3>
       <p>A minimal <code>/etc/config/usque</code> with the default Cloudflare connection and a second
@@ -707,40 +753,45 @@ ip route show | grep warp0</code></pre>
 	option default_route '0'
 	option metric '0'
 	option ipv6 '1'
+	option endpoint_ipv6 '0'
 	option ipv6_route 'auto'
 	option always_reconnect '1'
 	option auto_register '1'
 	option device_name ''
 	option log_level 'info'
+	option sni ''
 
 config usque 'backup'
 	option enabled '0'
 	option mode 'cloudflare'
-	option config_file '/etc/usque/warp1.json'
+	option config_file '/etc/usque/backup.json'
 	option interface 'warp1'
 	option default_route '1'
 	option metric '10'</code></pre>
       </figure>
       <p class="fineprint">The second connection is disabled in this example (<code>enabled
-      '0'</code>) — enable it when you need it. Option names, defaults and the global LAN IPv6 options
-      are listed in <a href="#advanced">Advanced</a>. Each connection needs a unique
-      <code>interface</code> and its own <code>config_file</code>.</p>
+      '0'</code>) — enable it when you need it. The default <code>config_file</code> is
+      <code>/etc/usque/&lt;section&gt;.json</code>; each connection needs a unique
+      <code>interface</code>. Option names, defaults and the global LAN IPv6 settings are listed in
+      <a href="#advanced">Advanced</a>.</p>
 
       <h3 id="custom">Custom MASQUE / Connect-IP endpoints</h3>
-      <p>Set <code>mode='custom'</code> to skip Cloudflare registration and use credentials you already
-      have. The connection's config file uses the same JSON layout as a WARP config, with the fields
-      below; there is <strong>no registration</strong> in this mode.</p>
+      <p>Set <code>mode='custom'</code> to skip Cloudflare registration and use credentials you
+      already have — in LuCI choose <em>Custom endpoint</em> as the connection's mode, then paste the
+      JSON into the <em>Configuration JSON</em> box and press <em>Import</em>, or write the file
+      yourself. There is <strong>no registration</strong> in this mode. Required fields:
+      <code>private_key</code>, <code>endpoint_v4</code>, <code>endpoint_pub_key</code> and
+      <code>ipv4</code>; optional: <code>ipv6</code>, <code>endpoint_v6</code>.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr><th scope="col">JSON field</th><th scope="col">Meaning</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>endpoint_v4</code>, <code>endpoint_v6</code></td><td>IP address(es) of the MASQUE endpoint (UDP/443 by default).</td></tr>
-            <tr><td><code>endpoint_pub_key</code></td><td>Endpoint's public key as a PEM block (the same format as a WARP config).</td></tr>
-            <tr><td><code>private_key</code></td><td>Your EC P-256 private key, base64 DER — the same encoding usque uses for WARP configs.</td></tr>
-            <tr><td><code>ipv4</code>, <code>ipv6</code></td><td>Addresses assigned to the tunnel interface by your provider.</td></tr>
-            <tr><td><code>sni</code> <span class="fineprint">(optional)</span></td><td>TLS server name to present instead of the endpoint IP.</td></tr>
+            <tr><td><code>private_key</code></td><td>Your EC P-256 private key, base64 DER — the same encoding usque uses for WARP configs. Required.</td></tr>
+            <tr><td><code>endpoint_v4</code>, <code>endpoint_v6</code></td><td>IP address(es) of the MASQUE endpoint (UDP/443 by default). <code>endpoint_v4</code> is required; <code>endpoint_v6</code> is optional.</td></tr>
+            <tr><td><code>endpoint_pub_key</code></td><td>Endpoint's public key as a PEM block (the same format as a WARP config). Required.</td></tr>
+            <tr><td><code>ipv4</code>, <code>ipv6</code></td><td>Addresses assigned to the tunnel interface by your provider. <code>ipv4</code> is required; <code>ipv6</code> is optional.</td></tr>
           </tbody>
         </table>
       </div>
@@ -751,13 +802,14 @@ config usque 'backup'
   "endpoint_pub_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
   "private_key": "&lt;base64 DER EC P-256 private key&gt;",
   "ipv4": "172.16.0.2",
-  "ipv6": "fd00::2",
-  "sni": ""
+  "ipv6": "fd00::2"
 }</code></pre>
       </figure>
-      <p class="fineprint">Shape only — get the real values from your provider. Write the file with mode
-      <code>600</code>, set <code>mode='custom'</code> in the connection and start the service;
-      <code>logread -e usque</code> reports the handshake result.</p>
+      <p class="fineprint">Shape only — get the real values from your provider. Importing writes the
+      file atomically with mode <code>600</code>. If your provider needs TLS SNI, set it as the
+      connection's <code>sni</code> option (LuCI: <em>TLS SNI (custom mode)</em>, passed as
+      <code>-s &lt;sni&gt;</code>); it is not part of the JSON. <code>logread -e usque</code> reports
+      the handshake result.</p>
       <p>The endpoint must speak a compatible MASQUE/Connect-IP service. Custom connections are not
       registered or re-registered by the init script, and <code>auto_register</code> does nothing for
       them.</p>
@@ -772,50 +824,56 @@ config usque 'backup'
 
       <h3 id="uci">UCI options</h3>
       <p>Each <code>config usque '&lt;name&gt;'</code> section is one connection. The section name is
-      the connection name used by LuCI and in <code>usque.&lt;name&gt;.option</code>.</p>
+      the connection name used by LuCI, the procd instance name and the state directory
+      (<code>/var/run/usque/&lt;name&gt;/</code>); the packaged default is <code>warp0</code>. Options
+      are read as <code>usque.&lt;name&gt;.option</code>.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Meaning</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>enabled</code></td><td><code>0</code></td><td>Start this connection with the service/boot.</td></tr>
+            <tr><td><code>enabled</code></td><td><code>0</code></td><td>Start this connection with the service/boot (each enabled connection runs as its own procd instance).</td></tr>
             <tr><td><code>mode</code></td><td><code>cloudflare</code></td><td><code>cloudflare</code> registers/manages a WARP device; <code>custom</code> uses your own JSON credentials for another MASQUE/Connect-IP endpoint.</td></tr>
-            <tr><td><code>config_file</code></td><td><code>/etc/usque/&lt;name&gt;.json</code></td><td>Identity/credentials file for this connection (mode 600). The default connection uses <code>/etc/usque/warp0.json</code>.</td></tr>
+            <tr><td><code>config_file</code></td><td><code>/etc/usque/&lt;section&gt;.json</code></td><td>Identity/credentials file for this connection (mode 600). The default connection therefore uses <code>/etc/usque/warp0.json</code>.</td></tr>
             <tr><td><code>interface</code></td><td><code>warp0</code></td><td>TUN interface name; must be unique across connections.</td></tr>
             <tr><td><code>mtu</code></td><td><code>1400</code></td><td>TUN MTU. Lower it (e.g. <code>1380</code>) for problematic mobile uplinks.</td></tr>
             <tr><td><code>endpoint_port</code></td><td><code>443</code></td><td>UDP port used to reach the endpoint.</td></tr>
             <tr><td><code>default_route</code></td><td><code>0</code></td><td>Install an IPv4 default route via the tunnel while connected (removed on stop). Off by default — see <a href="#routing">Routing</a>.</td></tr>
             <tr><td><code>metric</code></td><td><code>0</code></td><td>Metric for the tunnel default route(s); lower wins when several connections route by default.</td></tr>
-            <tr><td><code>ipv6</code></td><td><code>1</code></td><td>Enable IPv6 on the tunnel interface (and for the routing options below).</td></tr>
+            <tr><td><code>ipv6</code></td><td><code>1</code></td><td>Tunnel IPv6 address (with <code>0</code> the daemon runs with <code>--no-tunnel-ipv6</code>). Does not select the endpoint address family — that is <code>endpoint_ipv6</code>.</td></tr>
+            <tr><td><code>endpoint_ipv6</code></td><td><code>0</code></td><td>Connect to the MASQUE endpoint over IPv6 (<code>--ipv6</code>); only for native-v6 or v6-only networks.</td></tr>
             <tr><td><code>ipv6_route</code></td><td><code>auto</code></td><td><code>auto</code> installs an IPv6 default route only if the router has none; <code>always</code> installs it regardless; <code>off</code> never installs one.</td></tr>
             <tr><td><code>always_reconnect</code></td><td><code>1</code></td><td>Reconnect automatically when the tunnel drops.</td></tr>
             <tr><td><code>auto_register</code></td><td><code>1</code></td><td>Cloudflare mode only: register a WARP device if the config file is missing. Registration is non-interactive, so it <strong>accepts Cloudflare's WARP terms</strong> on your behalf — set it to <code>0</code> if you want to be asked.</td></tr>
             <tr><td><code>device_name</code></td><td><em>empty</em></td><td>Name used when registering a new device.</td></tr>
+            <tr><td><code>sni</code></td><td><em>empty</em></td><td>TLS SNI for custom endpoints (passed as <code>-s &lt;sni&gt;</code>). Not needed for Cloudflare WARP.</td></tr>
             <tr><td><code>log_level</code></td><td><code>info</code></td><td>Daemon log level: <code>error</code>, <code>warn</code>, <code>info</code>, <code>debug</code>.</td></tr>
           </tbody>
         </table>
       </div>
 
       <h3>Global options</h3>
-      <p>Two options apply to the whole package rather than a single connection. Set them in LuCI's
-      LAN IPv6 card, or inspect <code>/etc/config/usque</code> with <code>uci show usque</code> to see
-      the section they live on.</p>
+      <p>Two options live in the <code>config settings 'settings'</code> section and apply to the whole
+      package rather than a single connection (UCI path <code>usque.settings.*</code>). In LuCI they
+      are in <em>Global settings</em>.</p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Meaning</th></tr>
           </thead>
           <tbody>
-            <tr><td><code>lan_ipv6</code></td><td><code>0</code></td><td>Announce a ULA /64 to the LAN and NAT66 it through the tunnel (see <a href="#lan-ipv6">LAN IPv6</a>).</td></tr>
-            <tr><td><code>lan_ipv6_prefix</code></td><td><em>empty</em></td><td>ULA /64 used when <code>lan_ipv6</code> is on; empty = derived default.</td></tr>
+            <tr><td><code>lan_ipv6</code></td><td><code>0</code></td><td>Give LAN clients IPv6 through the tunnel (ULA + router advertisements + NAT66; see <a href="#lan-ipv6">LAN IPv6</a>).</td></tr>
+            <tr><td><code>lan_ipv6_prefix</code></td><td><em>empty</em></td><td>ULA prefix to use (<code>/48</code> or <code>/64</code>) when <code>lan_ipv6</code> is on; empty = derived from the LAN MAC.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Example: turn on full-tunnel routing and force IPv6 through the tunnel as well:</p>
+      <p>Example: turn on full-tunnel routing for the default connection, force IPv6 through the
+      tunnel and give LAN clients IPv6:</p>
       <figure class="cmd">
         <pre><code>uci set usque.warp0.default_route='1'
 uci set usque.warp0.ipv6_route='always'
+uci set usque.settings.lan_ipv6='1'
 uci commit usque
 /etc/init.d/usque restart</code></pre>
       </figure>
@@ -826,6 +884,9 @@ uci commit usque
       <code>private_key</code> and <code>access_token</code>; in custom mode it holds the fields listed
       under <a href="#custom">custom mode</a>. Files are written with mode <code>600</code> (root
       only).</p>
+      <p class="fineprint">The default path is <code>/etc/usque/&lt;section&gt;.json</code> (so the
+      default connection uses <code>warp0.json</code>). If a file ever ends up with the wrong mode,
+      LuCI offers <em>Fix permissions (chmod 600)</em> for the selected connection.</p>
       <ul class="bullets">
         <li><strong>Back one up</strong> off-device to keep the same WARP device across reinstalls:
         <code>cp /etc/usque/warp0.json /tmp/</code> and copy it away.</li>
@@ -851,20 +912,24 @@ usque --version</code></pre>
       </figure>
       <p class="fineprint">Manual <code>native-tun</code> runs do not install routes by themselves — the
       packaged service adds the routing hook and applies the switches described above. Use the service
-      for routed setups.</p>
+      for routed setups. The init script maps the UCI options to CLI flags: <code>ipv6='0'</code> →
+      <code>--no-tunnel-ipv6</code>, <code>endpoint_ipv6='1'</code> → <code>--ipv6</code>,
+      <code>sni</code> → <code>-s</code>.</p>
 
       <h3 id="service">Service commands and logs</h3>
       <figure class="cmd">
-        <pre><code>/etc/init.d/usque start      # starts every enabled connection
+        <pre><code>/etc/init.d/usque start          # every enabled connection
+/etc/init.d/usque start warp0    # one connection (section name)
+/etc/init.d/usque stop warp0
+/etc/init.d/usque restart warp0
 /etc/init.d/usque stop
-/etc/init.d/usque restart
-/etc/init.d/usque reload     # re-read UCI and restart the instances
+/etc/init.d/usque reload         # re-read UCI, restart the instances
 /etc/init.d/usque status
-/etc/init.d/usque enable     # start at boot
+/etc/init.d/usque enable         # start at boot
 /etc/init.d/usque disable
 
-logread -e usque             # recent log lines from the daemon
-logread -e usque -f          # follow live</code></pre>
+logread -e usque                 # all connections (lines are prefixed with the section name)
+logread -e usque -f              # follow live</code></pre>
       </figure>
       <p class="fineprint">If you edit UCI directly and only need the new options applied, run
       <code>uci commit usque &amp;&amp; /etc/init.d/usque restart</code>. procd restarts a connection at
@@ -874,14 +939,19 @@ logread -e usque -f          # follow live</code></pre>
       <h3 id="ubus">Status over ubus</h3>
       <p>The LuCI app is backed by an rpcd script, which is also handy for scripts and monitoring.</p>
       <figure class="cmd">
-        <pre><code>ubus call luci.usque status        # service + per-connection state, egress IP, routing switches
-ubus call luci.usque getConfig     # public config fields only (never key/token)
-ubus call luci.usque test          # one-shot internet + WARP check through the tunnel
-ubus call luci.usque logs          # recent usque log lines
-ubus call luci.usque setInitAction '{"action":"restart"}'
-ubus call luci.usque register      '{"name":"warp0","accept_tos":true}'
-ubus call luci.usque registerStatus</code></pre>
+        <pre><code>ubus call luci.usque status
+ubus call luci.usque getConfig            '{"section":"warp0"}'   # public fields only
+ubus call luci.usque test                 '{"section":"warp0"}'
+ubus call luci.usque logs                 '{"section":"warp0"}'
+ubus call luci.usque setInitAction        '{"action":"restart","section":"warp0"}'
+ubus call luci.usque register             '{"section":"warp0","name":"my-openwrt","accept_tos":true}'
+ubus call luci.usque registerStatus       '{"section":"warp0"}'
+ubus call luci.usque importConfig         '{"section":"backup","json":"{...}"}'
+ubus call luci.usque deleteConfig         '{"section":"backup"}'
+ubus call luci.usque fixConfigPermissions '{"section":"warp0"}'</code></pre>
       </figure>
+      <p class="fineprint">The private key and access token are never returned by
+      <code>getConfig</code>; <code>importConfig</code> only works for connections in custom mode.</p>
     </div>
   </section>
 
@@ -893,8 +963,9 @@ ubus call luci.usque registerStatus</code></pre>
 
       <details class="faq" id="ts-no-routing">
         <summary>usque is running but nothing is routed — is it broken?</summary>
-        <p>No — that is the default. With <code>default_route='0'</code> the tunnel is connected but no
-        traffic is sent into it. To route everything, enable <em>Default route</em> for the connection
+        <p>No — that is the default for IPv4. With <code>default_route='0'</code> the tunnel is
+        connected but no IPv4 traffic is sent into it (IPv6 may already be routed on WANs without a
+        native IPv6 default). To route everything, enable <em>Default route</em> for the connection
         (or <code>uci set usque.warp0.default_route='1'; uci commit usque; /etc/init.d/usque
         restart</code>), or add your own routes for selected prefixes. Check with:</p>
         <figure class="cmd">
@@ -925,8 +996,10 @@ ip -6 rule add priority 1000 from all lookup main   # only with IPv6 routing</co
       <details class="faq">
         <summary>IPv6 is connected but hosts still have no IPv6 route</summary>
         <p>With <code>ipv6_route='auto'</code> (default) usque only installs an IPv6 default route when
-        the router does not already have one. A leftover or provider-assigned IPv6 default route
-        therefore wins and is left untouched by design. Inspect and choose:</p>
+        the router has <strong>no native/WAN</strong> IPv6 default route. A leftover or
+        provider-assigned default route therefore wins and is left untouched by design (a route
+        installed by another usque connection does not count as native). The connection table shows
+        this as “IPv6: auto (no route needed)”. Inspect and choose:</p>
         <figure class="cmd">
           <pre><code>ip -6 route show default
 uci set usque.warp0.ipv6_route='always'   # force the tunnel
@@ -941,24 +1014,31 @@ uci set usque.warp0.ipv6='0'</code></pre>
 
       <details class="faq">
         <summary>LAN devices got no IPv6 addresses</summary>
-        <p><code>lan_ipv6</code> is off by default. When enabled it advertises a ULA /64 on the LAN and
-        NAT66s it through the tunnel. Check the switch (global, applying to all connections), that
-        odhcpd is running, and that the prefix does not collide:</p>
+        <p><code>lan_ipv6</code> is off by default. It needs an enabled connection with IPv6 on and
+        <code>ipv6_route</code> set to <code>auto</code> or <code>always</code>, so the tunnel provides
+        the IPv6 default route; the helper then fills in missing LAN settings. Check all of it:</p>
         <figure class="cmd">
-          <pre><code>uci show usque | grep -E 'lan_ipv6'
+          <pre><code>uci show usque.settings
+uci show network.globals.ula_prefix
+uci show network.lan | grep -E 'ip6assign|ip6addr'
+uci show dhcp.lan | grep -E 'ra|dhcpv6'
 ip -6 addr show br-lan
-logread -e odhcpd | tail -n 20</code></pre>
+logread -e usque | tail -n 20</code></pre>
         </figure>
-        <p>If you already run native IPv6 on the LAN, leave <code>lan_ipv6</code> off — the tunnel
-        should not compete with your existing RA/DHCPv6 setup.</p>
+        <p>If you already run native IPv6 on the LAN, leave <code>lan_ipv6</code> off — the helper
+        should not compete with your existing RA/DHCPv6 setup. Disabling <code>lan_ipv6</code> is
+        non-destructive: the generated <code>network</code>/<code>dhcp</code> settings stay, remove
+        them manually if you want to revert.</p>
       </details>
 
       <details class="faq">
         <summary>Only one of my connections is used, or routes flap between them</summary>
         <p>Only one IPv4 default route can win, and one IPv6 default route can win. If two connections
         both have <em>Default route</em> enabled, give them different <code>metric</code> values
-        (lower wins), or enable routing on just one of them and route other prefixes manually. Check
-        the interfaces and routes:</p>
+        (lower wins), or enable routing on just one of them and route other prefixes manually. The
+        hook ref-counts routing ownership across connections: the policy rule and the saved WAN
+        default route are only removed when the last routing connection stops. Check the interfaces
+        and routes:</p>
         <figure class="cmd">
           <pre><code>uci show usque | grep -E 'default_route|metric|interface'
 ip route show default
@@ -968,11 +1048,14 @@ ip -6 route show default</code></pre>
 
       <details class="faq" id="ts-custom">
         <summary>A custom (non-Cloudflare) connection does not connect</summary>
-        <p>Custom mode skips registration and uses what is in the JSON file. Common causes: wrong or
+        <p>Custom mode skips registration and uses what is in the JSON file (import it in the
+        connection's <em>Configuration JSON</em> box, or write it yourself). Common causes: wrong or
         expired keys, the endpoint unreachable over UDP/443, or a missing <code>sni</code> when the
-        provider requires TLS SNI. Check <code>logread -e usque</code> for handshake errors, verify the
-        file layout against <a href="#custom">custom mode</a>, and confirm the same credentials work
-        with another client. Remember: <code>auto_register</code> has no effect in custom mode.</p>
+        provider requires TLS SNI (<code>uci set usque.&lt;section&gt;.sni='example.com'</code>, passed
+        as <code>-s</code>). Check <code>logread -e usque</code> for handshake errors, verify the
+        required fields against <a href="#custom">custom mode</a>, and confirm the same credentials
+        work with another client. Remember: <code>auto_register</code> has no effect in custom
+        mode.</p>
       </details>
 
       <details class="faq" id="ts-luci">
@@ -994,7 +1077,8 @@ ip -6 route show default</code></pre>
         <ol>
           <li><code>logread -e usque | tail -n 40</code> — read the last error.</li>
           <li>Is the connection enabled? <code>uci show usque | grep -E 'enabled|interface'</code>. The
-          init script only starts connections with <code>enabled=1</code>.</li>
+          init script only starts connections with <code>enabled=1</code>, and if none is enabled the
+          service is stopped and disabled.</li>
           <li>Is there an identity (Cloudflare mode)? <code>ls -l /etc/usque/warp0.json</code>. If it
           is missing, either enable <code>auto_register</code> or register from LuCI / the CLI.</li>
           <li>Is the clock right? <code>date</code>. A router whose time is far off cannot complete
@@ -1100,10 +1184,12 @@ apk cache clean</code></pre>
 
       <details class="faq">
         <summary>Does installing usque change my routing?</summary>
-        <p>No. With the v2 defaults, installing and starting usque creates the tunnel but leaves your
-        default routes, <code>ip</code> rules, DNS and firewall forwarding unchanged. Traffic only
-        enters the tunnel after you enable <em>Default route</em> for a connection, add your own
-        routes, or enable the IPv6 routing options.</p>
+        <p>No IPv4 routing is changed: installing and starting usque creates the tunnel but leaves your
+        IPv4 default route, <code>ip</code> rules, DNS and firewall forwarding unchanged. IPv4 traffic
+        only enters the tunnel after you enable <em>Default route</em> for a connection or add your own
+        routes. IPv6 is the exception: with <code>ipv6_route=auto</code> a tunnel IPv6 default route is
+        installed only if the router has no native IPv6 default route, so IPv6 works on IPv4-only
+        WANs. Set <code>ipv6_route='off'</code> if you want no IPv6 routing changes either.</p>
       </details>
       <details class="faq">
         <summary>Why did the first release take over my routes?</summary>
@@ -1122,7 +1208,8 @@ apk cache clean</code></pre>
         <p>Leave <em>Default route</em> off and add your own routes for the prefixes you want tunneled
         (<code>ip route add &lt;prefix&gt; dev warp0</code>), or use policy routing (mwan3, nftables
         marks, <code>ip rule</code>). See <a href="#route-how">How do I get traffic through the
-        tunnel?</a>. This replaces the old "split tunnelling is not supported" limitation.</p>
+        tunnel?</a>. This replaces the old "split tunnelling is not supported" limitation. For IPv6,
+        <code>ipv6_route='off'</code> keeps usque out of the v6 routing table entirely.</p>
       </details>
       <details class="faq">
         <summary>Can I use more than one tunnel at a time?</summary>
