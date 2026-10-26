@@ -84,15 +84,21 @@ unlock() { rmdir "$SHARED/.lock" 2>/dev/null; }
 # Owner files contain "<section> <iface>" lines.
 owner_add() {
 	local file="$SHARED/$1"
-	grep -q "^$SECTION " "$file" 2>/dev/null || printf '%s %s\n' "$SECTION" "$IFACE" >> "$file"
+	grep -q "^$SECTION " "$file" 2>/dev/null || printf '%s %s %s\n' "$SECTION" "$IFACE" "$METRIC" >> "$file"
 }
 owner_del() {
 	local file="$SHARED/$1"
 	[ -f "$file" ] || return 0
 	grep -v "^$SECTION " "$file" > "$file.tmp" 2>/dev/null || : > "$file.tmp"
 	mv "$file.tmp" "$file"
+	[ -s "$file" ] || rm -f "$file"
 }
 owner_has() { grep -q "^$SECTION " "$SHARED/$1" 2>/dev/null; }
+# Metric recorded when this section installed its route (used for teardown
+# even if the UCI configuration has changed since).
+owner_metric() {
+	awk -v s="$SECTION" '$1 == s { print $3; exit }' "$SHARED/$1" 2>/dev/null
+}
 owner_count() {
 	local n
 	n="$(grep -c . "$SHARED/$1" 2>/dev/null || true)"
@@ -307,17 +313,27 @@ add_v4_default() {
 }
 
 del_v4_default() {
-	[ "$DEFAULT_ROUTE" = 1 ] || return 0
-	owner_has v4-default || return 0
-	ip route del default dev "$IFACE" metric "$METRIC" 2>/dev/null \
-		&& log "removed IPv4 default route dev $IFACE metric $METRIC"
+	local m last
+	# Teardown is state-driven: the UCI option may already be 0 again when
+	# the service is stopped/restarted, but the route/rule installed while it
+	# was 1 must still be removed.
+	if owner_has v4-default; then
+		m="$(owner_metric v4-default)"
+		if [ -n "$m" ]; then
+			ip route del default dev "$IFACE" metric "$m" 2>/dev/null || true
+		fi
+		ip route del default dev "$IFACE" 2>/dev/null || true
+		log "removed IPv4 default route dev $IFACE (metric ${m:-unknown})"
+	elif [ "$DEFAULT_ROUTE" = 1 ]; then
+		ip route del default dev "$IFACE" metric "$METRIC" 2>/dev/null || true
+	fi
 	lock
 	owner_del v4-default
-	local last
 	last="$(owner_count v4-default)"
 	unlock
 	# The policy rule is ref-counted separately: always drop this section's
-	# ownership, remove the rule only when no owner is left.
+	# ownership, remove the rule only when no owner is left (kernel-state
+	# based, so a lost state directory cannot leave the rule behind).
 	policy_del 4
 	if [ "$last" -eq 0 ]; then
 		restore_wan_defaults 4
@@ -378,14 +394,19 @@ add_v6_default() {
 }
 
 del_v6_default() {
-	[ "$IPV6_ENABLED" = 1 ] || return 0
-	[ "$IPV6_ROUTE" = off ] && return 0
-	owner_has v6-default || return 0
-	ip -6 route del default dev "$IFACE" metric "$METRIC" 2>/dev/null \
-		&& log "removed IPv6 default route dev $IFACE metric $METRIC"
+	local m last
+	if owner_has v6-default; then
+		m="$(owner_metric v6-default)"
+		if [ -n "$m" ]; then
+			ip -6 route del default dev "$IFACE" metric "$m" 2>/dev/null || true
+		fi
+		ip -6 route del default dev "$IFACE" 2>/dev/null || true
+		log "removed IPv6 default route dev $IFACE (metric ${m:-unknown})"
+	elif [ "$IPV6_ENABLED" = 1 ] && [ "$IPV6_ROUTE" != off ]; then
+		ip -6 route del default dev "$IFACE" metric "$METRIC" 2>/dev/null || true
+	fi
 	lock
 	owner_del v6-default
-	local last
 	last="$(owner_count v6-default)"
 	unlock
 	policy_del 6

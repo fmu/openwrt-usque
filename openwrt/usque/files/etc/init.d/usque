@@ -118,6 +118,17 @@ start_instance() {
 	mkdir -p "$STATE_ROOT/$sid"
 	ensure_config "$sid" || return 0
 
+	# Never touch an interface that another running connection owns (misconfigured
+	# duplicate interface names).
+	if iface_used_by_other_running "$s_interface" "$sid"; then
+		log "$sid: interface $s_interface is used by another running connection, not starting"
+		return 1
+	fi
+	# A previous stop may still have the TUN device around for a moment
+	# (procd kill is asynchronous).  Wait for it, then remove it, so the
+	# daemon can create its interface and addresses cleanly.
+	wait_iface_gone "$sid" "$s_interface"
+
 	procd_open_instance "$sid"
 	procd_set_param command "$PROG" --config "$s_config_file" native-tun \
 		-n "$s_interface" -m "$s_mtu" -P "$s_endpoint_port" \
@@ -148,6 +159,37 @@ start_instance() {
 	procd_close_instance
 
 	log "$sid: started (iface=$s_interface mode=$s_mode ipv6=$s_ipv6 ipv6_route=$s_ipv6_route default_route=$s_default_route metric=$s_metric)"
+}
+
+# True if another configured section with a running procd instance uses the
+# given interface name (defensive against duplicate interface configuration).
+iface_used_by_other_running() {
+	local iface="$1" self="$2" other other_iface
+	for other in $(uci -q show usque 2>/dev/null | sed -n 's/^usque\.\([^.=]*\)=usque$/\1/p'); do
+		[ "$other" = "$self" ] && continue
+		other_iface="$(uci -q get "usque.$other.interface" 2>/dev/null)"
+		[ -n "$other_iface" ] || other_iface=warp0
+		[ "$other_iface" = "$iface" ] || continue
+		procd_running "$(basename "$initscript")" "$other" && return 0
+	done
+	return 1
+}
+
+# Wait up to ~5s for the given interface to disappear; delete it if it is
+# still present (stale TUN device from a previous instance).  Only ever touches
+# the section's own interface.
+wait_iface_gone() {
+	local sid="$1" iface="$2" i=0
+	[ -n "$iface" ] || return 0
+	valid_iface "$iface" || return 0
+	while ip link show "$iface" >/dev/null 2>&1 && [ "$i" -lt 5 ]; do
+		i=$((i + 1))
+		sleep 1
+	done
+	if ip link show "$iface" >/dev/null 2>&1; then
+		log "$sid: stale interface $iface present, deleting it"
+		ip link del "$iface" >/dev/null 2>&1 || log "$sid: failed to delete stale interface $iface"
+	fi
 }
 
 stop_instance() {
@@ -243,6 +285,23 @@ stop_service() {
 	config_load usque
 	config_foreach stop_instance usque "$only"
 	[ -z "$only" ] && cleanup_orphan_policy_rules
+}
+
+# rc.common calls this after procd_kill: wait for the TUN device(s) of the
+# stopped instance(s) to disappear (and remove them if they linger).
+service_stopped() {
+	config_load usque
+	config_foreach cleanup_stopped_iface usque
+}
+
+cleanup_stopped_iface() {
+	local sid="$1" iface
+	section_options "$sid" || true
+	iface="$s_interface"
+	[ -n "$iface" ] || return 0
+	procd_running "$(basename "$initscript")" "$sid" && return 0
+	iface_used_by_other_running "$iface" "$sid" && return 0
+	wait_iface_gone "$sid" "$iface"
 }
 
 reload_service() {

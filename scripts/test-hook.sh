@@ -179,6 +179,31 @@ run_hook disconnect warp0 warp0 "" 1 always 0 0
 [ "$(default_dev)" = "wan0" ] && pass "IPv4 default still via wan0" || fail "IPv4 default broken ($(default_dev))"
 
 echo
+echo "== test 9: teardown is state-driven (default_route changed to 0 before stop)"
+run_hook connect warp0 warp0 "162.159.198.2:443" 0 off 1 0
+[ "$(rule4)" -eq 1 ] && pass "IPv4 rule installed while default_route=1" || fail "IPv4 rule missing"
+# user sets default_route=0 and restarts: the stop path now sees defroute=0
+run_hook disconnect warp0 warp0 "" 0 off 0 0
+[ "$(rule4)" -eq 0 ] && pass "IPv4 rule removed although the config now says default_route=0" || fail "IPv4 rule left behind after config change"
+[ -z "$(nsip route show default | grep 'dev warp0')" ] && pass "no warp0 default left" || fail "warp0 default left"
+[ "$(default_dev)" = "wan0" ] && pass "WAN IPv4 default restored" || fail "WAN default not restored"
+[ ! -e "$STATE/shared/v4-default" ] && pass "stale v4 owner state purged" || fail "stale v4 owner state left: $(cat "$STATE/shared/v4-default" 2>/dev/null)"
+[ ! -e "$STATE/shared/iprule-v4" ] && pass "stale v4 policy owner state purged" || fail "stale v4 policy owner state left"
+[ ! -e "$STATE/shared/iprule-v4.added" ] && pass "policy marker purged" || fail "policy marker left"
+
+echo
+echo "== test 10: IPv6 teardown is state-driven (ipv6_route changed to off before stop)"
+nsip -6 route del default via fd00:1::1 dev wan0 2>/dev/null || true
+run_hook connect warp0 warp0 "162.159.198.2:443" 1 auto 0 0
+[ "$(rule6)" -eq 1 ] && pass "IPv6 rule installed" || fail "IPv6 rule missing"
+[ "$(default6_dev)" = "warp0" ] && pass "IPv6 default via warp0" || fail "IPv6 default not via warp0"
+run_hook disconnect warp0 warp0 "" 1 off 0 0
+[ "$(rule6)" -eq 0 ] && pass "IPv6 rule removed although the config now says ipv6_route=off" || fail "IPv6 rule left behind after config change"
+[ -z "$(nsip -6 route show default)" ] && pass "IPv6 tunnel default removed" || fail "IPv6 tunnel default left"
+[ ! -e "$STATE/shared/v6-default" ] && pass "stale v6 owner state purged" || fail "stale v6 owner state left"
+[ ! -e "$STATE/shared/iprule-v6" ] && pass "stale v6 policy owner state purged" || fail "stale v6 policy owner state left"
+
+echo
 if [ "$FAILS" -ne 0 ]; then
 	echo "RESULT: $FAILS test(s) FAILED"
 	exit 1

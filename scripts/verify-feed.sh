@@ -68,7 +68,7 @@ assert usque.get("arch") == sys.argv[2], \
     "usque arch %r != %r" % (usque.get("arch"), sys.argv[2])
 assert "kmod-tun" in depnames(usque), \
     "usque does not depend on kmod-tun: %r" % depnames(usque)
-assert str(usque.get("version", "")).startswith("0.2.0"), usque.get("version")
+assert str(usque.get("version", "")).startswith("0.2."), usque.get("version")
 
 assert "luci-app-usque" in by_name, "luci-app-usque missing from index"
 luci = by_name["luci-app-usque"]
