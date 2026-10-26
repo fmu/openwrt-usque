@@ -83,8 +83,8 @@
       <div class="grid">
         <article class="card">
           <h3>MASQUE / Connect-IP</h3>
-          <p>Uses Cloudflare's WARP endpoints over HTTP/3 (QUIC), with Connect-IP for the tunnel's
-          addresses — no WireGuard required.</p>
+          <p>Uses Cloudflare's WARP endpoints over HTTP/3 (QUIC), with Connect-IP (RFC&nbsp;9484)
+          for the tunnel's addresses — no WireGuard required.</p>
         </article>
         <article class="card">
           <h3>One-click registration</h3>
@@ -745,7 +745,8 @@ apk del luci-app-usque usque</code></pre>
         <article class="card">
           <h3>Licence</h3>
           <p>MIT, same as upstream. The full text is in
-          <a href="https://github.com/fmu/openwrt-usque/blob/main/src/LICENSE.md" rel="noopener"><code>src/LICENSE.md</code></a>.</p>
+          <a href="https://github.com/fmu/openwrt-usque/blob/main/LICENSE.md" rel="noopener"><code>LICENSE.md</code></a>
+          (upstream copy: <code>src/LICENSE.md</code>).</p>
         </article>
       </div>
 
@@ -757,19 +758,24 @@ apk del luci-app-usque usque</code></pre>
           </thead>
           <tbody>
             <tr><td><code>src/</code></td><td>Vendored <code>usque-rs</code> at commit
-              <a href="https://github.com/FireMasterK/usque-rs/commit/f2a073c3cd23d45e792cbb7912d6b1461b1356c2" rel="noopener"><code>f2a073c</code></a>,
-              patched for OpenWrt (TUN only, <code>ring</code> crypto, size optimisations).</td></tr>
-            <tr><td><code>openwrt/usque/</code></td><td>apk package: init script, UCI defaults,
-              connect/disconnect routing hook.</td></tr>
-            <tr><td><code>openwrt/luci-app-usque/</code></td><td>LuCI app: view, menu entry, ACL and
-              the rpcd status/registration backend.</td></tr>
-            <tr><td><code>build/</code></td><td>Cross-compile/package scripts used by CI and the patch
-              notes (<code>build/PATCHES.md</code>).</td></tr>
-            <tr><td><code>.github/workflows/</code></td><td>CI: static armv7 build, SDK package build
-              + feed signing, GitHub Pages deployment.</td></tr>
+              <a href="https://github.com/FireMasterK/usque-rs/commit/f2a073c3cd23d45e792cbb7912d6b1461b1356c2" rel="noopener"><code>f2a073c</code></a>
+              (provenance in <code>UPSTREAM.md</code>), patched for OpenWrt: TUN only,
+              <code>ring</code> crypto, size optimisations.</td></tr>
+            <tr><td><code>openwrt/usque/</code></td><td>OpenWrt package: binary, procd init script, UCI
+              defaults, routing/firewall connect + disconnect hooks.</td></tr>
+            <tr><td><code>openwrt/luci-app-usque/</code></td><td>LuCI JS view, menu entry, ACL and the
+              rpcd backend for status, registration and diagnostics.</td></tr>
+            <tr><td><code>build/</code></td><td>Reproducible armv7 cross-compile script used by CI, plus
+              the patch notes (<code>build/PATCHES.md</code>).</td></tr>
+            <tr><td><code>scripts/</code></td><td>Feed assembly and signing.</td></tr>
+            <tr><td><code>.github/workflows/</code></td><td>CI: static armv7 build
+              (<code>build.yml</code>), SDK package build + feed signing (<code>package.yml</code>),
+              site + feed deployment (<code>publish.yml</code>).</td></tr>
             <tr><td><code>keys/usque.pem</code></td><td>Public key used to verify the apk feed.</td></tr>
-            <tr><td><code>tests/</code></td><td>End-to-end checks against a real router, with results.</td></tr>
+            <tr><td><code>tests/</code></td><td>Live-router verification scripts and results.</td></tr>
             <tr><td><code>docs/</code></td><td>This static site (plain HTML/CSS, no build step).</td></tr>
+            <tr><td><code>LICENSE.md</code>, <code>README.md</code></td><td>MIT licence text and the
+              project overview.</td></tr>
           </tbody>
         </table>
       </div>
@@ -782,11 +788,11 @@ apk del luci-app-usque usque</code></pre>
         <a href="https://github.com/fmu/openwrt-usque/tree/main/.github/workflows" rel="noopener">workflows</a>
         (<code>build.yml</code>) and <code>build/build-usque.sh</code>.</li>
         <li><strong>Package &amp; sign</strong> — the OpenWrt 25.12.6 SDK builds
-        <code>usque</code> and <code>luci-app-usque</code>; the repository index
-        <code>packages.adb</code> is signed with an ECDSA P-256 key
-        (<code>package.yml</code>).</li>
-        <li><strong>Publish</strong> — the Pages workflow copies <code>docs/</code> to the site root
-        and the signed feed to <code>/feed/</code>.</li>
+        <code>usque</code> and <code>luci-app-usque</code>; <code>scripts/</code> assembles the feed
+        and signs <code>packages.adb</code> with an ECDSA P-256 key (<code>package.yml</code>).</li>
+        <li><strong>Publish</strong> — <code>publish.yml</code> copies <code>docs/</code> to the site
+        root, puts the public key and the signed feed into <code>/feed/</code>, and deploys the
+        artifact to GitHub Pages.</li>
       </ol>
       <p>Build it yourself by cloning the repository and following the workflow files — the packaging
       is deliberately plain OpenWrt makefiles plus a GitHub Actions pipeline, no local OpenWrt
@@ -804,8 +810,9 @@ apk del luci-app-usque usque</code></pre>
       <h3>Credits &amp; licence</h3>
       <ul class="bullets">
         <li>Tunnel client: <a href="https://github.com/FireMasterK/usque-rs" rel="noopener">FireMasterK/usque-rs</a>,
-        MIT licensed — see <a href="https://github.com/fmu/openwrt-usque/blob/main/src/LICENSE.md" rel="noopener"><code>src/LICENSE.md</code></a>.</li>
-        <li>Packaging, init scripts and LuCI app: MIT, same repository.</li>
+        MIT licensed (upstream text kept at <code>src/LICENSE.md</code>).</li>
+        <li>Packaging, init scripts, LuCI app and this site: MIT, same repository —
+        see <a href="https://github.com/fmu/openwrt-usque/blob/main/LICENSE.md" rel="noopener"><code>LICENSE.md</code></a>.</li>
         <li>Cloudflare WARP, WARP and the Cloudflare logo are trademarks of Cloudflare, Inc.</li>
       </ul>
 
