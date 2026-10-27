@@ -184,7 +184,7 @@ run_carrier() { # run_carrier <udp|http2>
   printf '%s\n' "$TUN_STATE" > "$ART_DIR/phase1-$carrier-tunnel-state.txt"
   printf '%s' "$TUN_STATE" | grep -q "UP" && { ok "tun link $IFACE is UP"; record "$carrier tun $IFACE UP" PASS; } || { bad "tun link $IFACE not UP"; record "$carrier tun $IFACE UP" FAIL; }
   printf '%s' "$TUN_STATE" | grep -q "172.16.0.2" && { ok "tun has config IPv4 172.16.0.2/32"; record "$carrier tun IPv4 172.16.0.2" PASS; } || { bad "tun missing IPv4 172.16.0.2"; record "$carrier tun IPv4 172.16.0.2" FAIL; }
-  printf '%s' "$TUN_STATE" | grep -q "<WARP_CLIENT_IPV6>" && { ok "tun has config IPv6"; record "$carrier tun IPv6 addr" PASS; } || { bad "tun missing IPv6 addr"; record "$carrier tun IPv6 addr" FAIL; }
+  printf '%s' "$TUN_STATE" | grep -q "2606:4700:110:" && { ok "tun has config IPv6"; record "$carrier tun IPv6 addr" PASS; } || { bad "tun missing IPv6 addr"; record "$carrier tun IPv6 addr" FAIL; }
   printf '%s' "$TUN_STATE" | grep -q "mtu $EXPECT_MTU" && { ok "tun MTU $EXPECT_MTU"; record "$carrier tun MTU $EXPECT_MTU" PASS; } || { bad "tun MTU not $EXPECT_MTU"; record "$carrier tun MTU $EXPECT_MTU" FAIL; }
   printf '%s' "$TUN_STATE" | grep -q "^default dev $IFACE" && { ok "default route installed via $IFACE"; record "$carrier default route via $IFACE" PASS; } || { bad "default route NOT via $IFACE"; record "$carrier default route via $IFACE" FAIL; }
   printf '%s' "$TUN_STATE" | grep -q "162.159.198.2 via .* dev $WAN_DEV" && { ok "MASQUE endpoint bypassed via $WAN_DEV"; record "$carrier endpoint bypass route" PASS; } || info "endpoint bypass route not matched in dump (see evidence)"

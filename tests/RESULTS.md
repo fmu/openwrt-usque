@@ -1,5 +1,11 @@
 # usque on OpenWrt 25.12 — end-to-end test results
 
+> **Sanitized for publication:** private keys/tokens, internal hostnames, MAC addresses,
+> DHCP/ULA device identifiers and personal/public IP addresses in this report and in
+> `tests/baseline/` were replaced with `<REDACTED>`/example placeholders. Test outcomes
+> and package versions are unchanged.
+
+
 Tester: teammate `tester`. Target: live router `root@192.168.1.1`.
 Scripts: [`tests/`](.) (`phase1.sh`, `phase2.sh`, `snapshot.sh`, `fetch-artifacts.sh`,
 `deploy.sh`, `cleanup.sh`, `restore.sh`). Raw evidence: `tests/artifacts/`, baselines:

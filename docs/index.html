@@ -720,7 +720,7 @@ ip route show | grep warp0</code></pre>
         <p><strong>Verified end-to-end.</strong> On the live test router (<code>usque 0.2.1-r1</code> /
         <code>luci-app-usque 1.1.1-r1</code>) a Mac on the LAN received a ULA address from the
         announced prefix (<code>fd12:…</code>) and <code>curl -6</code> through the router reached
-        Cloudflare WARP (<code>ip=<WARP_EGRESS_IP></code>, <code>warp=on</code>,
+        Cloudflare WARP (<code>ip=&lt;WARP_EGRESS_IP&gt;</code>, <code>warp=on</code>,
         <code>colo=VIE</code>); the revert was clean.</p>
       </div>
       <div class="table-wrap">

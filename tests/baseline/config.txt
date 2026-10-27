@@ -1,3 +1,5 @@
+# SANITIZED EVIDENCE: keys, credentials, MAC addresses, device IDs and personal
+# IP addresses were redacted before publication.
 === uci-show-network
 network.loopback=interface
 network.loopback.device='lo'
